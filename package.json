@@ -1,0 +1,30 @@
+{
+  "name": "remote-personal-coding-agent",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Self-hosted remote coding agent: Telegram -> home PC -> GitHub Copilot CLI -> local repository.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "bin": {
+    "remote-agent": "./bin/remote-agent.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "start": "node --no-warnings=ExperimentalWarning dist/src/main.js",
+    "dev": "node --no-warnings=ExperimentalWarning --experimental-strip-types src/main.ts",
+    "agent": "node --no-warnings=ExperimentalWarning bin/remote-agent.js",
+    "doctor": "node --no-warnings=ExperimentalWarning bin/remote-agent.js doctor",
+    "test": "npm run build && node --no-warnings=ExperimentalWarning --test dist/tests/**/*.test.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "grammy": "^1.30.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}

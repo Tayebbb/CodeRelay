@@ -1,0 +1,18 @@
+# Secrets & local state — never commit
+.env
+.env.local
+*.env
+config/projects.json
+data/
+dist/
+node_modules/
+logs/
+*.log
+
+# OS / editor
+Thumbs.db
+.DS_Store
+.vscode/settings.json
+
+# Copilot session artifacts
+copilot-session-*.md
