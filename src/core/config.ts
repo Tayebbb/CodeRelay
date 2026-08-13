@@ -152,6 +152,15 @@ export function loadConfig(options: LoadOptions = {}): AppConfig {
     throw new ConfigError(`COPILOT_EFFORT must be one of ${EFFORT_LEVELS.join(', ')}`);
   }
 
+  // NB: deliberately NOT `COPILOT_AGENT` — VS Code's integrated terminal injects
+  // that name with an unrelated value, which would be passed to `--agent`.
+  const requestedAgent = env('COPILOT_CUSTOM_AGENT') ?? 'remote-engineer';
+  if (requestedAgent !== 'none' && !/^[A-Za-z][A-Za-z0-9._-]*$/.test(requestedAgent)) {
+    throw new ConfigError(
+      `COPILOT_CUSTOM_AGENT must be an agent name (letters, digits, dot, dash, underscore) or "none"; got "${requestedAgent}"`,
+    );
+  }
+
   const workspace = path.resolve(env('AGENT_WORKSPACE') ?? path.join(PROJECT_ROOT, 'data'));
   const projectsFile = path.resolve(env('PROJECTS_FILE') ?? path.join(PROJECT_ROOT, 'config', 'projects.json'));
 
@@ -171,7 +180,7 @@ export function loadConfig(options: LoadOptions = {}): AppConfig {
       model: env('COPILOT_MODEL') ?? 'claude-opus-4.8',
       modelFallback: env('COPILOT_MODEL_FALLBACK') ?? null,
       effort,
-      agent: env('COPILOT_AGENT') ?? null,
+      agent: requestedAgent === 'none' ? null : requestedAgent,
       autopilot: bool('COPILOT_AUTOPILOT', true),
       maxAutopilotContinues: int('MAX_AUTOPILOT_CONTINUES', 5, { min: 1, max: 50 }),
     },

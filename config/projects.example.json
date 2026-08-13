@@ -1,0 +1,23 @@
+{
+  "projects": [
+    {
+      "id": "medilink",
+      "name": "MediLink",
+      "path": "C:\\Users\\Me\\Projects\\MediLink",
+      "description": "Patient portal — Next.js + Prisma"
+    },
+    {
+      "id": "austhir",
+      "name": "AUSThir",
+      "path": "C:\\Users\\Me\\Projects\\AUSThir",
+      "testCommand": "npm run test:ci",
+      "buildCommand": "npm run build"
+    },
+    {
+      "id": "resume",
+      "name": "Resume",
+      "path": "C:\\Users\\Me\\Projects\\ResumeWebsite",
+      "enabled": true
+    }
+  ]
+}

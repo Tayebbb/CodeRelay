@@ -109,14 +109,14 @@ export class TaskRepository {
   }
 
   list(limit = 20): Task[] {
-    const rows = this.db.prepare('SELECT * FROM tasks ORDER BY id DESC LIMIT ?').all(limit) as TaskRow[];
+    const rows = this.db.prepare('SELECT * FROM tasks ORDER BY id DESC LIMIT ?').all(limit) as unknown as TaskRow[];
     return rows.map(toTask);
   }
 
   listByStatus(status: TaskStatus): Task[] {
     const rows = this.db
       .prepare('SELECT * FROM tasks WHERE status = ? ORDER BY id ASC')
-      .all(status) as TaskRow[];
+      .all(status) as unknown as TaskRow[];
     return rows.map(toTask);
   }
 
@@ -263,7 +263,7 @@ export class TaskRepository {
   recoverOrphans(): Task[] {
     const rows = this.db
       .prepare("SELECT * FROM tasks WHERE status IN ('RUNNING','TESTING')")
-      .all() as TaskRow[];
+      .all() as unknown as TaskRow[];
     const recovered: Task[] = [];
     for (const row of rows) {
       this.db

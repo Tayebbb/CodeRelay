@@ -151,10 +151,14 @@ export function runCopilot(options: CopilotRunOptions): Promise<CopilotRunResult
     };
 
     // The child inherits a sanitised environment: nothing from this app's own
-    // secrets is forwarded.
+    // secrets is forwarded, and editor-injected COPILOT_* variables are dropped
+    // so an IDE terminal cannot alter how the CLI behaves.
     const childEnv: NodeJS.ProcessEnv = { ...process.env, NO_COLOR: '1', CI: '1' };
     delete childEnv.TELEGRAM_BOT_TOKEN;
     delete childEnv.AUTHORIZED_TELEGRAM_USER_ID;
+    delete childEnv.COPILOT_AGENT;
+    delete childEnv.COPILOT_DEBUG_NONCE;
+    delete childEnv.COPILOT_MODEL;
 
     let child: ChildProcess;
     try {

@@ -55,7 +55,7 @@ export const RISK_RULES: RiskRule[] = [
   {
     id: 'push',
     description: 'Pushing to a remote repository',
-    pattern: /\b(git\s+push|push (to|the) (remote|origin|github)|open a (pr|pull request)|create a pull request|force[- ]push)\b/i,
+    pattern: /\b(git\s+push|force[- ]push|push\b[^.]{0,40}\b(remote|origin|upstream|github)\b|\b(remote|origin|upstream|github)\b[^.]{0,25}\bpush\b|open a (pr|pull request)|create a pull request)/i,
   },
   {
     id: 'destructive-git',

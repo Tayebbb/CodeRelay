@@ -16,7 +16,6 @@ import type { CopilotInfo } from '../copilot/detect.js';
 import { selectModel } from '../copilot/detect.js';
 import { ProgressReporter, type Notifier } from '../notify/notifier.js';
 import type { ApprovalService } from '../approval/service.js';
-import { assessRisk } from '../approval/risk.js';
 import { buildTaskPrompt } from './promptBuilder.js';
 import { formatReport } from '../telegram/format.js';
 
@@ -185,7 +184,9 @@ export class TaskRunner {
         if (controller.signal.aborted) return await fail('Cancelled by operator.', 'CANCELLED');
 
         const remainingMs = deadline - Date.now();
-        if (remainingMs <= 30_000) {
+        // The guard band only applies to retries: a first attempt always gets to
+        // start, even with a short budget, so the timeout is reported honestly.
+        if (remainingMs <= 0 || (attempt > 0 && remainingMs <= 30_000)) {
           return await fail(
             `Task exceeded MAX_TASK_DURATION_MINUTES (${config.limits.maxTaskDurationMs / 60_000} min).`,
             'TIMED_OUT',
