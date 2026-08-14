@@ -8,7 +8,8 @@
  */
 'use strict';
 
-const CACHE_NAME = 'coderelay-shell-v1';
+// Bump on shell changes: activate deletes older caches, forcing a refetch.
+const CACHE_NAME = 'coderelay-shell-v2';
 
 const SHELL = [
   '/',

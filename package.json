@@ -2,21 +2,24 @@
   "name": "coderelay",
   "version": "1.0.0",
   "private": true,
-  "description": "Your personal remote coding agent: send a task from your phone, your home PC runs GitHub Copilot against your local repo, tests it, and reports back. Telegram + installable web app, zero recurring cost.",
+  "description": "Remote-control your own coding agents. Send a task from your phone; your home PC runs GitHub Copilot CLI or Claude Code against your local repo, runs your tests, and reports back. Telegram bot + installable web app, zero recurring cost.",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Tayebbb/Mobile-agent-controller.git"
+    "url": "https://github.com/Tayebbb/CodeRelay.git"
   },
-  "homepage": "https://github.com/Tayebbb/Mobile-agent-controller#readme",
-  "bugs": "https://github.com/Tayebbb/Mobile-agent-controller/issues",
+  "homepage": "https://github.com/Tayebbb/CodeRelay#readme",
+  "bugs": "https://github.com/Tayebbb/CodeRelay/issues",
   "keywords": [
     "coding-agent",
     "github-copilot",
+    "claude-code",
     "telegram-bot",
     "pwa",
     "self-hosted",
-    "remote-development"
+    "remote-development",
+    "ai-agent",
+    "developer-tools"
   ],
   "type": "module",
   "engines": {

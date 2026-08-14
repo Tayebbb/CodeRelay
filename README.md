@@ -1,6 +1,11 @@
 # CodeRelay
 
-Your personal remote coding agent. Send a coding task from your phone — your home PC does the work with your AI coding CLI (GitHub Copilot by default, Claude Code optional), runs your tests, and reports back.
+**Remote-control your own coding agents.** Send a coding task from your phone — your home PC runs it with the AI coding CLI you already pay for (GitHub Copilot or Claude Code), runs your tests, and reports back.
+
+[![CI](https://github.com/Tayebbb/CodeRelay/actions/workflows/ci.yml/badge.svg)](https://github.com/Tayebbb/CodeRelay/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%E2%89%A522.5-brightgreen.svg)](https://nodejs.org)
+[![Dependencies](https://img.shields.io/badge/runtime%20deps-1-brightgreen.svg)](package.json)
 
 > **You**, from anywhere: _"myapp: fix the failing date parser tests"_
 >
@@ -36,8 +41,8 @@ Then open **PowerShell** on the PC that has your code and paste, block by block:
 **Step 1 — download and build CodeRelay:**
 
 ```powershell
-git clone https://github.com/Tayebbb/Mobile-agent-controller.git
-cd Mobile-agent-controller
+git clone https://github.com/Tayebbb/CodeRelay.git
+cd CodeRelay
 npm install
 npm run build
 ```
@@ -125,6 +130,7 @@ technical internals for those who want them._
 - [Install, step by step](#install-step-by-step)
 - [Add your projects](#add-your-projects)
 - [Run it](#run-it)
+- [Remote access — the whole point](#remote-access--the-whole-point)
 - [Using it from your phone](#using-it-from-your-phone)
 - [The web interface](#the-web-interface)
 - [Safety features](#safety-features)
@@ -173,7 +179,7 @@ The design takes that seriously. Every property below is enforced in code and co
 
 > **Only point this at repositories you would already be willing to `git clone` and `npm test` yourself.**
 
-Start with a throwaway repo. Watch a few tasks. Then decide how far to trust it.
+Start with a throwaway repo. Watch a few tasks. Then decide how far to trust it. Full threat model and private vulnerability reporting: [SECURITY.md](SECURITY.md).
 
 ---
 
@@ -197,8 +203,8 @@ read on when you want to understand each one or set up Telegram._
 ### 1. Get the code
 
 ```powershell
-git clone https://github.com/Tayebbb/Mobile-agent-controller.git
-cd Mobile-agent-controller
+git clone https://github.com/Tayebbb/CodeRelay.git
+cd CodeRelay
 npm install
 npm run build
 ```
@@ -317,6 +323,65 @@ powercfg /change standby-timeout-ac 0
 ```
 
 The task triggers **at logon**. If Windows reboots while you are away and stops at the lock screen, nothing runs until someone signs in. For long absences, enable Windows automatic sign-in.
+
+---
+
+## Remote access — the whole point
+
+CodeRelay exists so you can command your home PC from wherever you are. There
+are two remote channels, and they are independent — use either or both.
+
+### Channel 1: Telegram — zero network setup
+
+The bot connects *outward* to Telegram's servers, so it works from anywhere
+the moment it's configured — no tunnel, no port, no extra apps. If your only
+need is "send a task from the bus and get the result back", this is the
+simplest possible setup: **[docs/setup-telegram.md](docs/setup-telegram.md)**.
+
+### Channel 2: The web app, through your own private network
+
+The web interface never faces the open internet. Instead, your PC and phone
+join a private [Tailscale](https://tailscale.com) network (free for personal
+use) — an encrypted tunnel with **zero exposed ports and zero port
+forwarding**.
+
+**On the PC, once:**
+
+```powershell
+winget install --id Tailscale.Tailscale -e   # install Tailscale
+tailscale up                                 # a browser opens — sign in (Google/GitHub/MS account works)
+tailscale ip -4                              # prints the PC's private address, like 100.93.197.102
+```
+
+Tell CodeRelay to listen on that address, and restart it:
+
+```powershell
+Add-Content .env "WEB_HOST=<the 100.x.x.x address>"
+npm run agent -- stop
+Start-ScheduledTask -TaskName RemotePersonalCodingAgent   # or: npm start
+```
+
+**On the phone, once:** install the Tailscale app (App Store / Play Store),
+sign in with the **same account**, and flip its toggle on.
+
+**Then, from anywhere:** open `http://<the 100.x.x.x address>:8787` in the
+phone's browser and sign in with your web password. Home Wi-Fi, mobile data,
+another city, another country — it all works, because both devices are on the
+same private network no matter where they physically are.
+
+### Rules of the road
+
+- **Never port-forward this app.** It serves plain HTTP with a single
+  password; it is built for private networks only, and the docs deliberately
+  contain no port-forwarding instructions. Tailscale gives you remote access
+  without ever opening a port.
+- **Once `WEB_HOST` is set**, the PC's own browser must also use the
+  `100.x.x.x` address — `127.0.0.1` stops answering, by design.
+- **The PC must be on, awake and signed in.** Pair this with
+  `npm run agent -- startup install` (above) and
+  `powercfg /change standby-timeout-ac 0` so being away doesn't kill it.
+- **An SSH tunnel works too** if you already run an SSH server:
+  `ssh -L 8787:127.0.0.1:8787 you@home-pc`, then browse `localhost:8787`.
 
 ---
 
@@ -488,20 +553,22 @@ Everything lives in `.env`. Only the first two are required.
 
 **Run `npm run doctor` first.** It diagnoses nearly everything.
 
-| Symptom                                      | Fix                                                                                                              |
-| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- | --- | ----------------------------- | ----------------------------------------------------------------------------------------------- |
-| Bot ignores you                              | Your id isn't in `AUTHORIZED_TELEGRAM_USER_ID` — check with @userinfobot                                         |
-| `No interface is enabled`                    | Enable Telegram (token + id) or the web UI (`WEB_ENABLED=true`), or both                                         |
-| `…has no password yet`                       | `npm run agent -- web setup`                                                                                     |     | Password prompt looks frozen  | It hides your typing behind `*` — or run `npm run agent -- web setup --show` to see the letters |
-| Phone can't reach the web page               | Set `WEB_HOST` to the PC's Tailscale address and make sure the phone's Tailscale app is switched on              |
-| `127.0.0.1` refused after setting `WEB_HOST` | Expected — the server now listens on the `WEB_HOST` address only; use that address on the PC too                 |     | `401 Unauthorized` at startup | Wrong token, or another copy of the bot is already polling                                      |
-| `no account is signed in`                    | Run `copilot login`                                                                                              |
-| `Model "X" is not available`                 | Usually your Copilot allowance is temporarily spent. It switches model once automatically; otherwise retry later |
-| Task refused: merge conflicts                | Resolve them yourself first                                                                                      |
-| Task refused: filter/diff driver             | The repo makes git run commands when reading files. Inspect it before trusting it                                |
-| `Tests: not run`                             | No test command detected — register with `--test "..."`                                                          |
-| Stuck in `WAITING_APPROVAL`                  | Tap the button, or `/approve <id>`. Expires per `APPROVAL_TIMEOUT_MINUTES`                                       |
-| `Another agent instance is already running`  | `npm run agent -- stop`                                                                                          |
+| Symptom                                      | Fix                                                                                                               |
+| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Bot ignores you                              | Your id isn't in `AUTHORIZED_TELEGRAM_USER_ID` — check with @userinfobot                                          |
+| `No interface is enabled`                    | Enable Telegram (token + id) or the web UI (`WEB_ENABLED=true`), or both                                          |
+| `…has no password yet`                       | `npm run agent -- web setup`                                                                                       |
+| Password prompt looks frozen                 | It hides your typing behind `*` — or run `npm run agent -- web setup --show` to see the letters                   |
+| Phone can't reach the web page               | Set `WEB_HOST` to the PC's Tailscale address and make sure the phone's Tailscale app is switched on               |
+| `127.0.0.1` refused after setting `WEB_HOST` | Expected — the server now listens on the `WEB_HOST` address only; use that address on the PC too                  |
+| `401 Unauthorized` at startup                | Wrong token, or another copy of the bot is already polling                                                         |
+| `no account is signed in`                    | Run `copilot login`                                                                                               |
+| `Model "X" is not available`                 | Usually your allowance is temporarily spent — it switches model once automatically. If **every** model is refused (or you see `exceeded your monthly quota` despite having quota), the CLI's sign-in has gone stale: run `copilot login` again |
+| Task refused: merge conflicts                | Resolve them yourself first                                                                                        |
+| Task refused: filter/diff driver             | The repo makes git run commands when reading files. Inspect it before trusting it                                  |
+| `Tests: not run`                             | No test command detected — register with `--test "..."`                                                           |
+| Stuck in `WAITING_APPROVAL`                  | Tap the button, or `/approve <id>`. Expires per `APPROVAL_TIMEOUT_MINUTES`                                         |
+| `Another agent instance is already running`  | `npm run agent -- stop`                                                                                            |
 
 Logs: `data/logs/agent-YYYY-MM-DD.log` (JSON lines, redacted).
 Per-task detail: `npm run agent -- logs <id>`.
@@ -660,4 +727,6 @@ MIT — see [LICENSE](LICENSE).
 
 ## Contributing
 
-Issues and pull requests welcome. Anything touching permissions, redaction, git safety, the state machine or the approval flow must come with a test.
+Issues and pull requests welcome — **[CONTRIBUTING.md](CONTRIBUTING.md)** has the ground rules. The short version: `npm test` must pass (it makes no AI calls), no new dependencies, and anything touching permissions, redaction, git safety, the state machine or the approval flow must come with a test.
+
+Found a **security issue**? Please report it privately — see [SECURITY.md](SECURITY.md) — never in a public issue.
