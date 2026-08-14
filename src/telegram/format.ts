@@ -35,6 +35,11 @@ export interface ReportInput {
   model: string;
   durationMs: number;
   checkpointRef?: string;
+  /** How the work was orchestrated, e.g. "complex · explorer → implementer". */
+  plan?: string;
+  /** 0..1 self-evaluation, and whether a review was run. */
+  confidence?: number;
+  reviewVerdict?: string;
 }
 
 export function formatReport(input: ReportInput): string {
@@ -75,6 +80,11 @@ export function formatReport(input: ReportInput): string {
   lines.push(`Duration: ${formatDuration(durationMs)}`);
   lines.push(`AI usage: ${task.usage.aiCredits.toFixed(2)} credits`);
   lines.push(`Model: ${model}`);
+  if (input.plan) lines.push(`Plan: ${input.plan}`);
+  if (typeof input.confidence === 'number') {
+    const review = input.reviewVerdict ? `, review ${input.reviewVerdict}` : '';
+    lines.push(`Confidence: ${(input.confidence * 100).toFixed(0)}%${review}`);
+  }
 
   if (task.error) {
     lines.push('', 'Failure detail:', truncate(task.error, 1200));

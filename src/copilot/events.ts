@@ -28,6 +28,56 @@ export interface CopilotUsage {
   };
 }
 
+/**
+ * `session.shutdown` reports the same totals as `result` under different names
+ * (`totalPremiumRequests`, and `totalNanoAiu` on AI-credit billing). Reading it
+ * as a fallback means a CLI schema change cannot silently report a run as free.
+ */
+export function normaliseShutdownUsage(data: Record<string, unknown>): CopilotUsage {
+  const usage: CopilotUsage = {};
+
+  const premium = data.totalPremiumRequests ?? data.premiumRequests;
+  if (typeof premium === 'number' && premium > 0) {
+    usage.premiumRequests = premium;
+  } else if (typeof data.totalNanoAiu === 'number' && data.totalNanoAiu > 0) {
+    usage.premiumRequests = data.totalNanoAiu / 1e9;
+  } else if (typeof premium === 'number') {
+    usage.premiumRequests = premium;
+  }
+
+  if (typeof data.totalApiDurationMs === 'number') usage.totalApiDurationMs = data.totalApiDurationMs;
+
+  const changes = data.codeChanges as CopilotUsage['codeChanges'] | undefined;
+  if (changes && typeof changes === 'object') usage.codeChanges = changes;
+
+  return usage;
+}
+
+/** Combine usage reports, preferring the larger/more complete figures. */
+export function mergeUsage(base: CopilotUsage, incoming: CopilotUsage | undefined): CopilotUsage {
+  if (!incoming) return base;
+  const merged: CopilotUsage = { ...base };
+
+  if (incoming.premiumRequests !== undefined) {
+    merged.premiumRequests = Math.max(base.premiumRequests ?? 0, incoming.premiumRequests);
+  }
+  if (incoming.totalApiDurationMs !== undefined) merged.totalApiDurationMs = incoming.totalApiDurationMs;
+  if (incoming.sessionDurationMs !== undefined) merged.sessionDurationMs = incoming.sessionDurationMs;
+
+  if (incoming.codeChanges) {
+    const files = new Set([
+      ...(base.codeChanges?.filesModified ?? []),
+      ...(incoming.codeChanges.filesModified ?? []),
+    ]);
+    merged.codeChanges = {
+      linesAdded: Math.max(base.codeChanges?.linesAdded ?? 0, incoming.codeChanges.linesAdded ?? 0),
+      linesRemoved: Math.max(base.codeChanges?.linesRemoved ?? 0, incoming.codeChanges.linesRemoved ?? 0),
+      filesModified: [...files],
+    };
+  }
+  return merged;
+}
+
 export interface ToolRequest {
   name?: string;
   toolName?: string;

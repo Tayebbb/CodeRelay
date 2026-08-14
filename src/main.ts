@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bootstrapConfig, ConfigError } from './core/config.js';
 import { configureLogger, createLogger, errorMessage } from './core/logger.js';
-import { openDatabase } from './db/database.js';
+import { openDatabaseResilient } from './db/database.js';
 import { TaskRepository } from './db/taskRepository.js';
 import { ProjectRegistry } from './projects/registry.js';
 import { detectCopilot, selectModel } from './copilot/detect.js';
@@ -13,8 +13,44 @@ import { TaskRunner } from './runner/taskRunner.js';
 import { TaskQueue } from './runner/queue.js';
 import { TelegramBot } from './telegram/bot.js';
 import { nullNotifier, type Notifier } from './notify/notifier.js';
+import { acquireLock, isProcessAlive } from './core/lock.js';
+import { isTerminal } from './domain/task.js';
+import { Git } from './git/git.js';
 
 const log = createLogger('main');
+
+const RETENTION_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const CHECKPOINT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * Send a message to the operator without a grammY bot instance.
+ *
+ * Used only on the startup paths that fail before the bot exists. A plain HTTPS
+ * call keeps it dependency-free and, more importantly, keeps working when the
+ * reason we are aborting is that the bot could not be constructed.
+ */
+async function notifyOperatorsDirect(
+  config: { telegram: { botToken: string; authorizedUserIds: number[] } },
+  text: string,
+): Promise<void> {
+  const { botToken, authorizedUserIds } = config.telegram;
+  if (!botToken || authorizedUserIds.length === 0) return;
+
+  for (const chatId of authorizedUserIds) {
+    try {
+      const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, text: text.slice(0, 3500) }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!response.ok) log.warn('Startup notification rejected by Telegram', { status: response.status });
+    } catch (err) {
+      // Best effort: if the network is down there is nothing else we can do.
+      log.warn('Could not send startup notification', { error: errorMessage(err) });
+    }
+  }
+}
 
 export async function main(): Promise<number> {
   let config;
@@ -32,15 +68,27 @@ export async function main(): Promise<number> {
   configureLogger({ level: config.logLevel, directory: config.storage.logDirectory });
   log.info('Starting remote coding agent', { workspace: config.storage.workspace });
 
+  /**
+   * Tell the operator why we are refusing to start, THEN exit.
+   *
+   * Everything below this point can fail before the bot exists, and the startup
+   * task restarts the process every minute. Without this the most likely real
+   * failure — an expired `copilot login` — is a silent hourly restart loop that
+   * the owner, who is far from the machine, never hears about.
+   */
+  const abort = async (code: number, message: string): Promise<number> => {
+    console.error(`\n${message}\n`);
+    log.error('Refusing to start', { code, message });
+    await notifyOperatorsDirect(config, `🚫 The coding agent could not start.\n\n${message}`);
+    return code;
+  };
+
   const copilot = await detectCopilot(config.copilot.bin);
   if (!copilot.installed || !copilot.launcher) {
-    console.error(`\nCopilot CLI unavailable: ${copilot.error}\n`);
-    console.error('Install it with:  npm install -g @github/copilot\n');
-    return 3;
+    return await abort(3, `Copilot CLI unavailable: ${copilot.error}\nInstall it with:  npm install -g @github/copilot`);
   }
   if (!copilot.authenticatedUser) {
-    console.error('\nCopilot CLI is installed but no account is signed in. Run: copilot login\n');
-    return 4;
+    return await abort(4, 'Copilot CLI is installed but no account is signed in.\nRun on the PC:  copilot login');
   }
 
   const selection = selectModel(config.copilot.model, config.copilot.modelFallback, copilot.models);
@@ -60,20 +108,54 @@ export async function main(): Promise<number> {
   }
 
   const pidFile = path.join(config.storage.workspace, 'agent.pid');
-  const existing = readPidFile(pidFile);
-  if (existing !== null && isProcessAlive(existing)) {
-    console.error(`\nAnother agent instance is already running (pid ${existing}).\n`);
+  const lock = acquireLock(pidFile);
+  if (!lock.acquired) {
+    // Deliberately NOT reported to Telegram: the instance already running is
+    // the one that will answer, and a message per restart attempt is noise.
+    console.error(`\nAnother agent instance is already running (pid ${lock.heldBy?.pid}).\n`);
     return 5;
   }
-  fs.writeFileSync(pidFile, String(process.pid), 'utf8');
 
-  const db = openDatabase(config.storage.databaseFile);
+  let db;
+  let quarantined: string | null = null;
+  try {
+    const opened = openDatabaseResilient(config.storage.databaseFile);
+    db = opened.db;
+    quarantined = opened.quarantined;
+    if (quarantined) {
+      log.error('Task database was corrupt and has been moved aside; starting with a fresh one', { quarantined });
+    }
+  } catch (err) {
+    lock.release();
+    return await abort(
+      6,
+      `Could not open the task database (${config.storage.databaseFile}): ${errorMessage(err)}`,
+    );
+  }
+
   const tasks = new TaskRepository(db);
-  tasks.pruneProcessedUpdates();
+  tasks.pruneHistory();
 
   const projects = new ProjectRegistry(config.storage.projectsFile);
   projects.load();
   log.info('Project registry loaded', { count: projects.enabled().length });
+
+  const retentionTimer = setInterval(() => {
+    void (async () => {
+      try {
+        tasks.pruneHistory();
+        // Checkpoint refs pin whole trees, so they must be swept from the user's
+        // repositories too, not just from our own database.
+        for (const project of projects.enabled()) {
+          const removed = await new Git(project.path).pruneCheckpoints(CHECKPOINT_RETENTION_MS);
+          if (removed > 0) log.info('Pruned old checkpoints', { project: project.id, removed });
+        }
+      } catch (err) {
+        log.warn('Retention sweep failed', { error: errorMessage(err) });
+      }
+    })();
+  }, RETENTION_INTERVAL_MS);
+  retentionTimer.unref?.();
 
   // The bot is the Notifier, but the ApprovalService and TaskRunner are created
   // first. A tiny forwarding shim breaks the cycle.
@@ -101,64 +183,121 @@ export async function main(): Promise<number> {
 
   queue.start();
 
+  // Approval waiters live only in memory. A task left in WAITING_APPROVAL by a
+  // restart would otherwise never reach a terminal state.
+  const stranded = tasks.pendingApprovals();
+  for (const task of stranded) {
+    try {
+      tasks.transition(task.id, 'CANCELLED', {
+        error: 'The agent restarted while this task was awaiting approval. Re-send it with /retry.',
+        approvalStatus: 'EXPIRED',
+      });
+      log.warn('Cancelled a task stranded in WAITING_APPROVAL by a restart', { taskId: task.id });
+    } catch (err) {
+      log.error('Could not clear a stranded approval', { taskId: task.id, error: errorMessage(err) });
+    }
+  }
+
   let shuttingDown = false;
-  const shutdown = async (signal: string) => {
+  const shutdown = async (signal: string, exitCode = 0) => {
     if (shuttingDown) return;
     shuttingDown = true;
+    if (exitCode !== 0) process.exitCode = exitCode;
     log.info('Shutting down', { signal });
+    clearInterval(retentionTimer);
+
+    // Stop polling FIRST: otherwise a task or approval created during the drain
+    // below would be missed by cancelAll() and could block shutdown for minutes.
+    await bot.stopAcceptingUpdates().catch(() => {});
     approvals.cancelAll();
-    await queue.stop();
-    await bot.stop().catch(() => {});
+
+    // Wait for in-flight work so its terminal state is written BEFORE the
+    // database closes; otherwise the task is re-queued and re-billed.
+    await queue.stop().catch(() => {});
+
+    // Anything that did not unwind within the grace period is marked terminal
+    // here rather than left RUNNING for recoverOrphans to re-run and re-bill.
+    for (const id of queue.activeIds()) {
+      try {
+        const task = tasks.get(id);
+        if (task && !isTerminal(task.status)) {
+          tasks.transition(id, 'CANCELLED', {
+            error: 'The agent shut down while this task was running. It was not resumed automatically.',
+          });
+        }
+      } catch (err) {
+        log.warn('Could not finalise a task during shutdown', { taskId: id, error: errorMessage(err) });
+      }
+    }
+
+    await bot.drainApprovalFlows().catch(() => {});
     try {
       db.close();
     } catch {
       // ignore
     }
-    fs.rmSync(pidFile, { force: true });
-    process.exit(0);
+    lock.release();
+    process.exit(exitCode);
   };
 
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
+  process.on('SIGBREAK', () => void shutdown('SIGBREAK'));
   process.on('unhandledRejection', (reason) => log.error('Unhandled rejection', { error: errorMessage(reason) }));
-  process.on('uncaughtException', (err) => log.error('Uncaught exception', { error: errorMessage(err) }));
+  process.on('uncaughtException', (err) => {
+    // Staying alive after a fatal error produces a wedged agent that looks idle
+    // from the phone. Exit non-zero so the supervisor restarts it cleanly.
+    log.error('Uncaught exception — exiting so the supervisor can restart', { error: errorMessage(err) });
+    process.exitCode = 1;
+    void shutdown('uncaughtException', 1);
+    // Must outlast the shutdown budget: queue.stop() alone allows 20s, and a
+    // Copilot child gets a 10s post-kill grace. Exiting at 5s cut shutdown off
+    // before it could write the task's terminal state — so the task was
+    // re-queued and RE-BILLED on restart — and left the child process running.
+    setTimeout(() => process.exit(1), 35_000).unref?.();
+  });
 
-  const recovered = tasks.listByStatus('QUEUED');
-  await bot.notifyOperators(
-    [
-      '🟢 Home PC agent is online',
-      '',
-      `Copilot CLI: v${copilot.version} (${copilot.authenticatedUser})`,
-      `Model: ${selection.model}${selection.fellBack ? ` (fallback from ${selection.requested})` : ''}`,
-      `Projects: ${projects.enabled().length}`,
-      recovered.length > 0 ? `Recovered ${recovered.length} queued task(s).` : '',
-      selection.note ? `\n⚠️ ${selection.note}` : '',
-    ]
-      .filter(Boolean)
-      .join('\n'),
-  ).catch(() => {});
+  const recovery = queue.recoveryReport();
+  const banner = [
+    '🟢 Home PC agent is online',
+    '',
+    `Copilot CLI: v${copilot.version} (${copilot.authenticatedUser})`,
+    `Model: ${selection.model}${selection.fellBack ? ` (fallback from ${selection.requested})` : ''}`,
+    `Projects: ${projects.enabled().length}`,
+    `Sandbox: ${config.copilot.sandbox ? 'on (experimental)' : 'off'}`,
+    ...recovery.requeued.map(
+      (task) =>
+        `♻️ Task #${task.id} was interrupted (${task.usage.aiCredits.toFixed(2)} credits spent) and will re-run.\n` +
+        `   Snapshot of your work before it started: git checkout refs/remote-agent/checkpoint-${task.id} -- .`,
+    ),
+    ...recovery.abandoned.map(
+      (task) => `⚠️ Task #${task.id} was interrupted too many times and was abandoned. Use /retry to run it again.`,
+    ),
+    stranded.length > 0 ? `⚠️ ${stranded.length} task(s) awaiting approval were cancelled by the restart.` : '',
+    quarantined ? `⚠️ The task database was corrupt and was moved to ${quarantined}. History was lost; projects and code are untouched.` : '',
+    projects.loadError() ? `⚠️ Project registry problem: ${projects.loadError()}` : '',
+    selection.note ? `\n⚠️ ${selection.note}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
 
-  await bot.start();
+  // Sent after polling starts so it is not lost when the network is not up yet.
+  await bot.start({ onReady: () => void bot.notifyOperators(banner).catch(() => {}) });
   return 0;
 }
 
 export function readPidFile(file: string): number | null {
   try {
-    const pid = Number.parseInt(fs.readFileSync(file, 'utf8').trim(), 10);
-    return Number.isNaN(pid) ? null : pid;
+    const raw = fs.readFileSync(file, 'utf8').trim();
+    if (/^\d+$/.test(raw)) return Number.parseInt(raw, 10);
+    const parsed = JSON.parse(raw) as { pid?: number };
+    return typeof parsed.pid === 'number' ? parsed.pid : null;
   } catch {
     return null;
   }
 }
 
-export function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return (err as NodeJS.ErrnoException).code === 'EPERM';
-  }
-}
+export { isProcessAlive };
 
 const invoked = process.argv[1] ? path.resolve(process.argv[1]) : '';
 if (invoked && invoked === fileURLToPath(import.meta.url)) {

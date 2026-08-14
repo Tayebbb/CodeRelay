@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { redact, redactDeep } from './redact.js';
 
@@ -16,20 +16,73 @@ export interface LogRecord {
 }
 
 let minLevel: LogLevel = 'info';
-let logFile: string | null = null;
+let logDirectory: string | null = null;
+let currentDay: string | null = null;
+let activeFile: string | null = null;
+let bytesWritten = 0;
+
+const MAX_LOG_BYTES = 8 * 1024 * 1024;
+const MAX_LOG_AGE_DAYS = 30;
 
 export function configureLogger(options: { level?: LogLevel; directory?: string }): void {
   if (options.level) minLevel = options.level;
   if (options.directory) {
     mkdirSync(options.directory, { recursive: true });
-    const day = new Date().toISOString().slice(0, 10);
-    logFile = path.join(options.directory, `agent-${day}.log`);
+    logDirectory = options.directory;
+    currentDay = null;
+    activeFile = null;
+    pruneOldLogs();
   }
 }
 
-/** Current structured log file path, if file logging is configured. */
-export function currentLogFile(): string | null {
-  return logFile;
+function today(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+/**
+ * Resolve the file to write to now. The day is recomputed per write: an agent
+ * that runs for a month would otherwise append everything to the file named
+ * after the day it started.
+ */
+function resolveLogFile(): string | null {
+  if (!logDirectory) return null;
+  const day = today();
+  if (day !== currentDay || activeFile === null) {
+    currentDay = day;
+    activeFile = path.join(logDirectory, `agent-${day}.log`);
+    try {
+      bytesWritten = statSync(activeFile).size;
+    } catch {
+      bytesWritten = 0;
+    }
+    pruneOldLogs();
+  }
+  return activeFile;
+}
+
+/** Rotate only when the running byte count says we must — no stat per line. */
+function rotateIfLarge(file: string): void {
+  if (bytesWritten < MAX_LOG_BYTES) return;
+  try {
+    renameSync(file, `${file}.${Date.now()}.old`);
+  } catch {
+    // Missing file or a race: nothing to rotate.
+  }
+  bytesWritten = 0;
+}
+
+function pruneOldLogs(): void {
+  if (!logDirectory) return;
+  const cutoff = Date.now() - MAX_LOG_AGE_DAYS * 24 * 60 * 60 * 1000;
+  try {
+    for (const name of readdirSync(logDirectory)) {
+      if (!name.startsWith('agent-')) continue;
+      const full = path.join(logDirectory, name);
+      if (statSync(full).mtimeMs < cutoff) rmSync(full, { force: true });
+    }
+  } catch {
+    // Retention is best-effort.
+  }
 }
 
 function write(record: LogRecord): void {
@@ -43,9 +96,13 @@ function write(record: LogRecord): void {
   else if (record.level === 'warn') console.warn(consoleMsg);
   else console.log(consoleMsg);
 
-  if (logFile) {
+  const file = resolveLogFile();
+  if (file) {
     try {
-      appendFileSync(logFile, line + '\n', 'utf8');
+      rotateIfLarge(file);
+      const payload = line + '\n';
+      appendFileSync(file, payload, 'utf8');
+      bytesWritten += Buffer.byteLength(payload);
     } catch {
       // Logging must never take the agent down.
     }

@@ -255,12 +255,29 @@ export async function runDoctor(): Promise<DoctorReport> {
   if (copilot.launcher && !copilot.launcher.safe) {
     results.push({
       name: 'Copilot launch safety',
-      status: 'warn',
-      detail: 'Resolved to a shell shim; prompts would be passed through a shell',
-      hint: 'Set COPILOT_BIN to <npm root -g>/@github/copilot/npm-loader.js for shell-free execution.',
+      status: 'fail',
+      detail: 'Resolved to a shell shim; prompt text would pass through a shell',
+      hint: 'Set COPILOT_BIN to <npm root -g>/@github/copilot/npm-loader.js',
     });
   }
   results.push(checkCopilotAuth(copilot));
+
+  if (config) {
+    results.push(
+      config.copilot.sandbox
+        ? {
+            name: 'Shell containment',
+            status: 'pass',
+            detail: 'COPILOT_SANDBOX=true — shell commands run in the CLI\u2019s OS sandbox',
+          }
+        : {
+            name: 'Shell containment',
+            status: 'warn',
+            detail: 'Sandbox off — shell commands run with your full user rights',
+            hint: 'The deny-list is defence in depth, not a boundary. Set COPILOT_SANDBOX=true for real containment (experimental; may break some builds).',
+          },
+    );
+  }
 
   if (config?.copilot.agent === AGENT_NAME) {
     results.push(

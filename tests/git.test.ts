@@ -107,3 +107,136 @@ describe('git safety', () => {
     fs.rmSync(plain, { recursive: true, force: true });
   });
 });
+
+describe('git status parsing edge cases', () => {
+  let repo2: string;
+
+  async function git2(args: string[]) {
+    return execCommand('git', args, { cwd: repo2, shell: false, timeoutMs: 60_000 });
+  }
+
+  before(async () => {
+    repo2 = path.join(os.tmpdir(), `rpca-git2-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    fs.mkdirSync(repo2, { recursive: true });
+    await git2(['init', '-b', 'main']);
+    await git2(['config', 'user.email', 'test@example.com']);
+    await git2(['config', 'user.name', 'Test']);
+    await git2(['config', 'commit.gpgsign', 'false']);
+    fs.writeFileSync(path.join(repo2, 'original.ts'), 'export const a = 1;\n');
+    await git2(['add', '.']);
+    await git2(['commit', '-m', 'initial']);
+  });
+
+  after(() => {
+    fs.rmSync(repo2, { recursive: true, force: true });
+  });
+
+  test('a renamed file is staged under its new path, not a mangled score string', async () => {
+    const gitApi = new Git(repo2);
+    await git2(['mv', 'original.ts', 'renamed.ts']);
+
+    const status = await gitApi.status();
+    // A porcelain-v2 "2 " record puts a rename score where an ordinary record
+    // puts the path; mis-parsing yields "R100 renamed.ts<TAB>original.ts", which
+    // git then rejects as a pathspec — killing the whole commit.
+    assert.ok(status.staged.includes('renamed.ts'), `staged was ${JSON.stringify(status.staged)}`);
+    assert.ok(!status.staged.some((f) => /^R\d/.test(f)), 'no rename score leaked into a path');
+    assert.ok(!status.staged.some((f) => f.includes('\t')), 'no tab-joined path pair leaked');
+
+    const staged = await gitApi.stageAll(() => false);
+    assert.ok(staged.includes('renamed.ts'));
+    assert.ok(await gitApi.hasStagedChanges(), 'the rename must actually reach the index');
+  });
+
+  test('handles non-ASCII filenames without quoting artefacts', async () => {
+    const gitApi = new Git(repo2);
+    fs.writeFileSync(path.join(repo2, 'café-données.ts'), 'export const b = 2;\n');
+
+    const status = await gitApi.status();
+    assert.ok(
+      status.untracked.includes('café-données.ts'),
+      `untracked was ${JSON.stringify(status.untracked)}`,
+    );
+
+    const staged = await gitApi.stageAll(() => false);
+    assert.ok(staged.includes('café-données.ts'));
+    assert.ok(await gitApi.hasStagedChanges());
+  });
+
+  test('stages far more files than fit on a command line', async () => {
+    const gitApi = new Git(repo2);
+    const dir = path.join(repo2, 'bulk');
+    fs.mkdirSync(dir, { recursive: true });
+
+    // Comfortably beyond the 32 KB Windows command-line limit as argv.
+    const count = 600;
+    const longName = 'a'.repeat(60);
+    for (let i = 0; i < count; i += 1) {
+      fs.writeFileSync(path.join(dir, `${longName}-${i}.ts`), 'export const x = 1;\n');
+    }
+
+    const staged = await gitApi.stageAll(() => false);
+    assert.ok(staged.length >= count, `expected >= ${count} staged, got ${staged.length}`);
+
+    const cached = await git2(['diff', '--cached', '--name-only']);
+    assert.ok(cached.stdout.split(/\r?\n/).filter(Boolean).length >= count, 'all files reached the index');
+  });
+
+  test('a second checkpoint does not overwrite the first', async () => {
+    const gitApi = new Git(repo2);
+    const first = await gitApi.createCheckpoint(77);
+    assert.ok(first);
+
+    fs.writeFileSync(path.join(repo2, 'later.ts'), 'export const c = 3;\n');
+    const second = await gitApi.createCheckpoint(77);
+    assert.ok(second);
+
+    assert.notEqual(second!.ref, first!.ref, 'the original recovery point must survive a re-run');
+    const original = await git2(['rev-parse', first!.ref]);
+    assert.equal(original.stdout.trim(), first!.commit);
+  });
+
+  test('stages a deletion the agent made', async () => {
+    const gitApi = new Git(repo2);
+    await git2(['add', '.']);
+    await git2(['commit', '-m', 'baseline for deletion test']);
+
+    fs.rmSync(path.join(repo2, 'later.ts'));
+    const status = await gitApi.status();
+    assert.ok(status.modified.includes('later.ts'), 'a deleted tracked file is a change');
+
+    const staged = await gitApi.stageAll(() => false);
+    assert.ok(staged.includes('later.ts'), 'the deletion must reach the index, not be silently dropped');
+
+    const cached = await git2(['diff', '--cached', '--name-status']);
+    assert.match(cached.stdout, /D\s+later\.ts/);
+  });
+
+  test('detects unmerged paths so a conflicted repo is never reported clean', async () => {
+    const conflict = path.join(os.tmpdir(), `rpca-conflict-${Date.now()}`);
+    fs.mkdirSync(conflict, { recursive: true });
+    const run = (args: string[]) => execCommand('git', args, { cwd: conflict, shell: false, timeoutMs: 30_000 });
+
+    await run(['init', '-b', 'main']);
+    await run(['config', 'user.email', 't@e.com']);
+    await run(['config', 'user.name', 'T']);
+    await run(['config', 'commit.gpgsign', 'false']);
+    fs.writeFileSync(path.join(conflict, 'f.txt'), 'base\n');
+    await run(['add', '.']);
+    await run(['commit', '-m', 'base']);
+
+    await run(['checkout', '-b', 'side']);
+    fs.writeFileSync(path.join(conflict, 'f.txt'), 'side\n');
+    await run(['commit', '-am', 'side']);
+    await run(['checkout', 'main']);
+    fs.writeFileSync(path.join(conflict, 'f.txt'), 'main\n');
+    await run(['commit', '-am', 'main']);
+    await run(['merge', 'side']);
+
+    const status = await new Git(conflict).status();
+    assert.ok(status.unmerged.includes('f.txt'), `unmerged was ${JSON.stringify(status.unmerged)}`);
+    assert.equal(status.clean, false);
+
+    fs.rmSync(conflict, { recursive: true, force: true });
+  });
+});

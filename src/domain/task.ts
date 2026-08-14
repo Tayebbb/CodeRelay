@@ -48,6 +48,8 @@ export interface TaskUsage {
   aiCredits: number;
   outputTokens: number;
   copilotSessionIds: string[];
+  /** Copilot runs that finished without telling us what they cost. */
+  unreportedRuns: number;
 }
 
 export interface VerificationResult {
@@ -100,7 +102,7 @@ export interface NewTask {
   approvalReason: string | null;
 }
 
-export const EMPTY_USAGE: TaskUsage = { aiCredits: 0, outputTokens: 0, copilotSessionIds: [] };
+export const EMPTY_USAGE: TaskUsage = { aiCredits: 0, outputTokens: 0, copilotSessionIds: [], unreportedRuns: 0 };
 
 export function statusEmoji(status: TaskStatus): string {
   switch (status) {

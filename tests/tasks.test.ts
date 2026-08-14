@@ -89,17 +89,47 @@ describe('task repository', () => {
     assert.equal(tasks.get(task.id)!.status, 'RUNNING');
 
     const recovered = tasks.recoverOrphans();
-    assert.equal(recovered.length, 1);
+    assert.equal(recovered.requeued.length, 1);
+    assert.equal(recovered.abandoned.length, 0);
     assert.equal(tasks.get(task.id)!.status, 'QUEUED');
     assert.equal(tasks.get(task.id)!.runnerPid, null);
+    db.close();
+  });
+
+  test('abandons a task interrupted too many times instead of re-billing forever', () => {
+    const { db, tasks } = repo();
+    const task = tasks.create(NEW_TASK);
+
+    for (let i = 0; i < 3; i += 1) {
+      tasks.claimNextQueued(process.pid);
+      const round = tasks.recoverOrphans(3);
+      assert.equal(round.requeued.length, 1, `crash ${i + 1} should re-queue`);
+    }
+    assert.equal(tasks.get(task.id)!.retryCount, 3);
+
+    tasks.claimNextQueued(process.pid);
+    const final = tasks.recoverOrphans(3);
+    assert.equal(final.abandoned.length, 1, 'the fourth interruption abandons the task');
+    assert.equal(tasks.get(task.id)!.status, 'FAILED');
+    db.close();
+  });
+
+  test('preserves spent credits across a crash recovery', () => {
+    const { db, tasks } = repo();
+    const task = tasks.create(NEW_TASK);
+    tasks.claimNextQueued(process.pid);
+    tasks.updateUsage(task.id, { aiCredits: 3.5, outputTokens: 10, copilotSessionIds: [], unreportedRuns: 0 });
+
+    tasks.recoverOrphans();
+    assert.equal(tasks.get(task.id)!.usage.aiCredits, 3.5, 'spend must not be forgotten on restart');
     db.close();
   });
 
   test('tracks AI credit usage in a ledger', () => {
     const { db, tasks } = repo();
     const task = tasks.create(NEW_TASK);
-    tasks.updateUsage(task.id, { aiCredits: 1.5, outputTokens: 100, copilotSessionIds: ['a'] }, 'claude-opus-4.8');
-    tasks.updateUsage(task.id, { aiCredits: 4.0, outputTokens: 300, copilotSessionIds: ['a'] }, 'claude-opus-4.8');
+    tasks.updateUsage(task.id, { aiCredits: 1.5, outputTokens: 100, copilotSessionIds: ['a'], unreportedRuns: 0 }, 'claude-opus-4.8');
+    tasks.updateUsage(task.id, { aiCredits: 4.0, outputTokens: 300, copilotSessionIds: ['a'], unreportedRuns: 0 }, 'claude-opus-4.8');
 
     assert.equal(tasks.get(task.id)!.usage.aiCredits, 4.0);
     // Ledger records deltas, so the 24h total equals the latest cumulative value.
@@ -110,7 +140,7 @@ describe('task repository', () => {
   test('counts only recent usage inside the window', async () => {
     const { db, tasks } = repo();
     const task = tasks.create(NEW_TASK);
-    tasks.updateUsage(task.id, { aiCredits: 3, outputTokens: 0, copilotSessionIds: [] });
+    tasks.updateUsage(task.id, { aiCredits: 3, outputTokens: 0, copilotSessionIds: [], unreportedRuns: 0 });
 
     assert.equal(tasks.creditsUsedSince(60_000), 3);
     await new Promise((resolve) => setTimeout(resolve, 25));

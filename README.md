@@ -131,6 +131,57 @@ QUEUED ──▶ RUNNING ──▶ TESTING ──▶ COMPLETED
 Transitions are validated; illegal jumps throw. Every transition is written to
 an append-only event log.
 
+### Orchestration
+
+One "agent" here is one Copilot CLI session, and one session costs real credits.
+The CLI already explores, edits and runs tools inside a single session, so a
+literal seven-agent pipeline would multiply the bill for the same change. The
+design therefore keeps **decisions free and only work paid**.
+
+```
+        request ──▶ classify (free, plain TypeScript)
+                        │
+        simple ─────────┼───────── medium ───────── complex
+          │             │             │                │
+     implementer   implementer   implementer   explorer ─▶ implementer
+          │             │             │                │
+          └──────── tests / build (free) ──────────────┘
+                        │
+              confidence score (free)
+                        │
+              ≥ threshold ──▶ done
+                        │
+              < threshold ──▶ reviewer (read-only) ──▶ fix ──▶ tests again
+```
+
+- **Classification is deterministic and costs nothing.** Nothing asks a model
+  how much model to buy.
+- **Free gates run before paid ones.** Tests, build, manifest-integrity, the
+  repository-config scan and the git-surface check all run first; most defects
+  are caught for zero credits.
+- **Roles are prompt profiles plus a tool policy, not processes.** The explorer
+  and reviewer run with `--deny-tool=write`. That flag covers file-editing tools
+  but, by the CLI's own documentation, **not shell invocations** — and a live run
+  was observed writing a file through PowerShell after its edit tool was denied.
+  So the read-only promise is not delegated: the runner records the repository's
+  changed-file set before and after each advisory pass and **fails the task** if
+  one of them wrote anything. Verified by test, not assumed.
+- **The survey is handed over, not repeated.** The explorer's notes are injected
+  into the implementer's prompt so the repository is not explored twice.
+- **Escalation is evidence-based.** Security *keywords* never buy a session on
+  their own — "fix the typo on the login page" must not pay for an audit. A
+  change that actually touches `auth/`, `session/`, a workflow file or a
+  Dockerfile does escalate, and that check is free.
+- **A review costs two sessions, not one**, because there is no point being told
+  about a defect with no budget left to fix it. Plans that do not fit
+  `MAX_AGENT_CALLS_PER_TASK` are trimmed, not promised.
+
+| Request | Sessions |
+|---|---|
+| "Rename `getUser` to `fetchUser`" | 1 |
+| "Fix the API bug where /users returns 500" | 1 (+1 retry only if tests fail) |
+| "Redesign authentication" | up to 4: survey → implement → review → fix |
+
 ### Source layout
 
 ```
@@ -143,11 +194,12 @@ src/
   git/        git wrapper and non-destructive checkpointing
   verify/     test/build command detection
   approval/   risk classification + human-in-the-loop gate
-  runner/     task runner, prompt builder, queue
+  orchestrator/ free task classification, agent budget, confidence scoring
+  runner/     preflight, agent loop, stop-reason decisions, publish, queue
   telegram/   bot, auth, NL parsing, message formatting
   health/     doctor diagnostics
   notify/     transport-agnostic notifier + progress aggregation
-tests/        113 automated tests, incl. an end-to-end suite with a mock CLI
+tests/        306 automated tests, incl. an end-to-end suite with a mock CLI
 ```
 
 ---
@@ -211,17 +263,32 @@ npm run agent -- models
 
 Set `COPILOT_MODEL` in `.env` to a model your CLI actually lists.
 
-> **Important, verified on this machine (Copilot CLI 1.0.79):**
-> there is **no `claude-opus-5`** in the CLI's model catalogue. The strongest
-> Claude model exposed is **`claude-opus-4.8`**, which is what `.env.example`
-> uses. This project does **not** fake it and does **not** fall back to a paid
-> Anthropic API. If Opus 5 becomes available to your Copilot account, change one
-> line in `.env` and restart — nothing else needs to change.
+> **Verified on this machine (Copilot CLI 1.0.79): `claude-opus-5` exists and is
+> the default.** It did not exist in 1.0.63, and the catalogue changes between
+> CLI versions — the CLI auto-updates, so **re-run `remote-agent models` after
+> an update** rather than assuming. `COPILOT_MODEL_FALLBACK` defaults to
+> `claude-opus-4.8`.
 
 At startup and on every `/status`, the agent validates `COPILOT_MODEL` against
 the CLI's real catalogue. If the model is missing it either uses
 `COPILOT_MODEL_FALLBACK` (telling you it did) or refuses to run the task and
 explains why. It never silently substitutes a model.
+
+**The catalogue is not an entitlement.** A model can be listed by the CLI and
+still be refused by the API at run time:
+
+```
+Error: Model "claude-opus-5" from --model flag is not available.
+```
+
+This was observed live, minutes after the same model completed a task, so it is
+usually **transient rate limiting** rather than a permanent problem. When it
+happens the agent switches to `COPILOT_MODEL_FALLBACK` once (or, if that is the
+model that was just refused, to any other model the CLI advertises), tells you
+on Telegram, and does not count the switch as a recovery attempt. If every
+candidate is refused it stops and asks you to set a usable
+`COPILOT_MODEL_FALLBACK` — it never treats this as a fatal startup error and
+never spends more to work around it.
 
 ### Custom agent
 
@@ -314,13 +381,17 @@ From Telegram:
 
 ```powershell
 npm start                       # foreground
-npm run agent -- status         # is it running? what is queued?
-npm run agent -- stop
-npm run agent -- tasks 20
-npm run agent -- logs 42
-npm run agent -- doctor
-npm run agent -- test           # self-test; makes no AI calls
+remote-agent status             # is it running? what is queued?
+remote-agent stop
+remote-agent tasks 20
+remote-agent logs 42
+remote-agent doctor
+remote-agent models             # models this CLI build supports
+remote-agent install-agent      # (re)install the custom Copilot agent
+remote-agent test               # self-test; makes no AI calls
 ```
+
+(Use `npm run agent -- <command>` if you have not linked the `remote-agent` bin.)
 
 On start the agent messages you *"🟢 Home PC agent is online"* with the Copilot
 version, the resolved model and the project count.
@@ -363,22 +434,27 @@ All settings live in `.env`. `.env.example` documents every key. Highlights:
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | — | From @BotFather (required) |
 | `AUTHORIZED_TELEGRAM_USER_ID` | — | Your numeric id (required) |
-| `COPILOT_MODEL` | `claude-opus-4.8` | Must exist in your CLI build |
-| `COPILOT_MODEL_FALLBACK` | `claude-sonnet-4.6` | Used if the above is missing |
+| `COPILOT_MODEL` | `claude-opus-5` | Must exist in your CLI build |
+| `COPILOT_MODEL_FALLBACK` | `claude-opus-4.8` | Used if the above is missing |
 | `COPILOT_CUSTOM_AGENT` | `remote-engineer` | `none` to disable |
-| `MAX_AI_CREDITS_PER_TASK` | `10` | Stop a task at this many credits |
+| `COPILOT_SANDBOX` | `false` | **The only real shell containment.** Experimental; see Security |
+| `COPILOT_REPO_INSTRUCTIONS` | `false` | Load the target repo's AGENTS.md as instructions |
+| `COPILOT_GITHUB_MCP` | `false` | Keep the GitHub MCP server (bypasses `ALLOWED_URLS`) |
+| `COPILOT_ENV_PASSTHROUGH` | — | Extra env vars to forward to the agent (default: none) |
+| `MAX_AI_CREDITS_PER_TASK` | `10` | App-enforced; also passed to the CLI when ≥ 30 |
 | `MAX_AI_CREDITS_PER_DAY` | `50` | Rolling 24 h budget |
 | `MAX_TASK_DURATION_MINUTES` | `30` | Wall-clock ceiling |
 | `MAX_RETRIES` | `2` | Recovery attempts after failing verification |
-| `MAX_CONCURRENT_TASKS` | `1` | Keep at 1 |
+| `MAX_CONCURRENT_TASKS` | `1` | Tasks in the same project are always serialised |
 | `MAX_AUTOPILOT_CONTINUES` | `5` | The CLI's own runaway guard |
 | `AUTO_COMMIT` | `true` | Commit after verification passes |
 | `AUTO_PUSH` | `false` | **Off**; even when on, every push needs approval |
+| `ALLOW_COMMIT_WITHOUT_VERIFICATION` | `false` | Commit when no test/build command exists |
 | `GIT_CHECKPOINT` | `true` | Snapshot uncommitted work first |
 | `REQUIRE_APPROVAL_WHEN_DIRTY` | `true` | Ask before working in a dirty repo |
 | `REQUIRE_APPROVAL_FOR_DANGEROUS_ACTIONS` | `true` | Risk-gated approvals |
 | `PROTECTED_BRANCHES` | `main,master,production,release` | Commit needs approval here |
-| `ALLOWED_URLS` | github/npm/pypi | Everything else is denied |
+| `ALLOWED_URLS` | npm/pypi/github | Everything else is denied |
 | `EXTRA_DENIED_COMMANDS` | — | Added to the built-in deny-list |
 
 > `COPILOT_CUSTOM_AGENT` is deliberately **not** named `COPILOT_AGENT`: VS Code's
@@ -414,65 +490,163 @@ shim can be found, `doctor` warns you.
 `--allow-all-tools` (required for non-interactive use) **combined with an
 explicit deny-list**, and deny always beats allow in the CLI's permission model:
 
-- *Denied shell commands*: `rm`, `del`, `format`, `dd`, `shutdown`, `sudo`,
-  `runas`, `icacls`, `reg`, `netsh`, `iptables`, `cmdkey`, `security`, `gpg`,
-  `ssh`, `scp`, `nc`, `docker`, `kubectl`, `terraform`, `aws`, `az`, `gcloud`,
-  `gh`, `apt`, `brew`, `choco`, `winget`, … (plus anything in
-  `EXTRA_DENIED_COMMANDS`)
-- *Denied git*: `push`, `reset`, `clean`, `rebase`, `filter-branch`, `config`,
+- *Denied interpreters* — `node`, `python`, `bash`, `sh`, `pwsh`, `powershell`,
+  `cmd`, `perl`, `ruby`, `npx`, `xargs`, `env`, … Without these the rest of the
+  list is decorative, because `node -e "fs.rmSync(...)"` performs any denied
+  action without ever naming a denied command.
+- *Denied shell commands* — `rm`, `del`, `format`, `dd`, `shutdown`, `sudo`,
+  `runas`, `icacls`, `reg`, `netsh`, `cmdkey`, `security`, `gpg`, `ssh`, `scp`,
+  `curl`, `wget`, `docker`, `kubectl`, `terraform`, `aws`, `az`, `gcloud`, `gh`,
+  `apt`, `brew`, `choco`, `winget`, plus PowerShell write aliases
+  (`Remove-Item`, `Set-Content`, `Out-File`, `Move-Item`, …)
+- *Denied git* — `push`, `reset`, `clean`, `rebase`, `filter-branch`, `config`,
   `remote`, `submodule`, `gc`, `reflog`
-- *Paths*: because `--allow-all-paths` is never passed, file access is confined
-  to the working directory — the selected project — plus the temp dir
-- *Network*: only `ALLOWED_URLS` domains; this covers the shell tool too, so
-  `curl https://evil.example` is blocked by the same rule
-- *Autonomy*: `--no-ask-user` (never blocks on a prompt), `--no-remote` (the
-  session cannot be driven from anywhere else), `--no-auto-update`
+- *Denied writes* — `.env`, `.npmrc`, `.netrc`, `id_rsa`, `credentials.json`, …
+- *Network* — only `ALLOWED_URLS` domains, **and** writable GitHub endpoints
+  (`api.github.com`, `gist.github.com`, `uploads.github.com`) are explicitly
+  denied, because an authenticated machine could otherwise exfiltrate to a gist
+- *Autonomy* — `--no-ask-user`, `--no-remote`, `--no-auto-update`
 
-**5 — Secrets never leave.** A redaction layer scrubs GitHub tokens, PATs,
+> ### Read this: what the deny-list is and is not
+>
+> `copilot help sandbox` states that with sandboxing **disabled (the default)**,
+> *"shell commands run directly on your machine with the same access your user
+> account has."* So:
+>
+> - The path restriction constrains the CLI's built-in **file tools**, not shell
+>   commands.
+> - A command deny-list **cannot** be a sound boundary. We deny the interpreters
+>   too, but an exhaustive blocklist over a Turing-complete surface is
+>   impossible, and shell redirection (`echo x > .env`) has no command name to
+>   deny at all.
+>
+> **The real containment boundary is `COPILOT_SANDBOX=true`**, which runs shell
+> commands inside the CLI's OS-level MXC sandbox (Windows 11 / macOS /
+> Linux+`bwrap`). It is experimental and can break some builds, so it is
+> opt-in — but if you run tasks against code you did not write, turn it on.
+> `remote-agent doctor` warns you when it is off.
+
+**5 — The agent gets a built-from-scratch environment.** The child process
+receives an **allow-list** of toolchain variables only. Credentials
+(`GITHUB_TOKEN`, `AWS_*`, `NPM_TOKEN`, anything matching `*TOKEN*`/`*SECRET*`/
+`*AUTH*`…) are withheld, and so are code-injection variables that would
+otherwise slip through a toolchain prefix — `NODE_OPTIONS`, `PYTHONSTARTUP`,
+`JAVA_TOOL_OPTIONS`, `MAVEN_OPTS`, `GRADLE_OPTS`, `LD_PRELOAD`, `BASH_ENV`.
+Withheld credential values are registered with the redactor so they can never be
+echoed by another route. Use `COPILOT_ENV_PASSTHROUGH` if a build truly needs one.
+
+**6 — Secrets never leave.** A redaction layer scrubs GitHub tokens, PATs,
 Telegram tokens, `sk-`/`AIza`/`AKIA` keys, JWTs, private-key blocks,
 `*_SECRET=`/`*_TOKEN=`/`*_PASSWORD=` assignments and credentials embedded in
 connection strings — from **every** Telegram message, log line, stored prompt
-and event. Files like `.env`, `id_rsa`, `*.pem`, `.npmrc`, `secrets.yaml` are
-excluded from commits and from result reports. The Copilot child process is
-launched with the bot token stripped from its environment and additionally
-declared via `--secret-env-vars`. The custom agent is instructed never to read
-or print secrets.
+and event. The project's own `.env`/`.npmrc` values are additionally read at task
+start *purely to register them as forbidden strings*, so even an arbitrary value
+like `DB_PASSWORD=correct-horse` is stripped if the agent ever echoes it. Files
+like `.env`, `id_rsa`, `*.pem`, `.npmrc`, `secrets.yaml` are excluded from
+commits and from result reports.
 
-**6 — Approvals for risky work.** A local rule-based classifier flags requests
+**7 — Prompt injection and repository-controlled configuration are treated as
+real threats.** Repository content is declared untrusted **data** in both the
+task prompt and the custom agent. Beyond wording, the following are enforced:
+
+- **Repository-supplied Copilot config is blocked.** The CLI resolves agents,
+  skills, hooks, plugins, MCP servers and language servers *relative to the
+  working directory* — which is your project. A repo shipping
+  `.github/agents/remote-engineer.md` would **replace the safety rules this whole
+  design depends on**; `.github/hooks/*.json`, `.mcp.json`, `.github/skills/`,
+  `plugin.json` and `.github/lsp.json` all name commands or auto-approve tools.
+  Every one of these is detected before Copilot is launched and requires
+  approval. (Verified present in the installed CLI bundle.)
+- **A repository cannot supply the programs we run.** Windows resolves a bare
+  program name from the **current directory before PATH**, and the current
+  directory is the target repository. Both halves were verified on this machine:
+  a planted `git.exe` was executed by our own git wrapper (with the full parent
+  environment, including the bot token, during preflight and before any
+  approval), and a planted `npm.cmd` was executed by the verification step —
+  neither needs the agent to do anything. `git` is now resolved to an absolute
+  path from PATH, and every child gets
+  `NoDefaultCurrentDirectoryInExePath=1`, which removes the current directory
+  from shell lookups. Both attacks have regression tests.
+- **Repo instruction files are not loaded.** `--no-custom-instructions` is passed
+  by default, so `AGENTS.md` / `CLAUDE.md` / `.github/copilot-instructions.md` in
+  the *target* repository cannot act as instructions. Opt in with
+  `COPILOT_REPO_INSTRUCTIONS=true` for repositories you trust.
+- **The GitHub MCP server is disabled.** It speaks HTTP with your GitHub identity
+  and is therefore *not* covered by `ALLOWED_URLS` — a ready-made exfiltration
+  channel. Re-enable with `COPILOT_GITHUB_MCP=true`.
+- **Git hooks and git config cannot execute.** `.git/hooks/` and `.git/config`
+  live inside the project, so the agent can write them, and git then runs what
+  they name **as you**. Two verified attacks: a `post-commit` hook (which
+  `--no-verify` does *not* stop) and `core.fsmonitor` (which runs on
+  `git status`). Every git invocation now pins `core.hooksPath`, `core.fsmonitor`,
+  `gpg.program`, `credential.helper`, `core.sshCommand`, `diff.external`,
+  `protocol.ext.allow` and the editors. In addition the whole git control surface
+  — config, every `*hooks*` directory (including the CLI's own
+  `.git/copilot-hooks`), submodule configs, `.gitattributes` — is fingerprinted
+  before the agent runs and re-checked on **every** exit path. Any change stops
+  the task: nothing is tested, committed or pushed.
+- **Verification runs with a filtered environment.** `npm test` is
+  project-supplied code, so it gets the same allow-listed environment as the
+  agent — not the operator's shell. Without this a hostile `"test"` script would
+  read `TELEGRAM_BOT_TOKEN` out of `process.env` and take over the control
+  channel on the very first task.
+- **What the test command executes is fingerprinted**, including the files named
+  inside `package.json` lifecycle scripts (`"test": "node evil.js"`) and the
+  build-control files that silently redirect a build — `.cargo/config.toml`,
+  `.mvn/jvm.config`, `gradle.properties`, `Directory.Build.props`, runner
+  configs. A change means the command is not run until you approve it.
+- **The agent cannot re-launch itself.** `copilot`, `claude`, `aider`, `code`
+  and friends are denied: `copilot -p "…" --yolo` would start a second session
+  with none of our flags.
+
+**8 — Approvals for risky work.** A local rule-based classifier flags requests
 involving bulk deletion, database migrations, system packages, paths outside the
 project, firewall/network config, credentials, deployment, pushing, destructive
 git or privilege escalation. Those tasks park in `WAITING_APPROVAL` and send you
-an inline **APPROVE / REJECT** keyboard. Ordinary coding — read, edit, test,
-build, `git status`, `git diff` — runs without nagging you.
+an inline **APPROVE / REJECT** keyboard. Only the operator who created a task can
+answer its approval, and `/retry` re-runs the risk assessment so a rejected task
+cannot be laundered through it. Ordinary coding — read, edit, test, build,
+`git status`, `git diff` — runs without nagging you.
 
-**7 — Your uncommitted work is never destroyed.** See below.
+**9 — Your uncommitted work is never destroyed.** See below.
 
-**8 — Nothing listens.** No inbound port, no webhook, no public endpoint. The
-optional dashboard binds to `127.0.0.1` only.
+**10 — Nothing listens.** No inbound port, no webhook, no public endpoint.
 
 ### Git safety in detail
 
 Before any task touches a repository:
 
+- **A conflicted repository is refused outright.** If `git status` reports
+  unmerged paths the task stops immediately — an autonomous agent must never
+  "resolve" a merge for you, and staging a conflicted tree would commit conflict
+  markers.
 - `git status` is inspected. If there are uncommitted changes and
   `REQUIRE_APPROVAL_WHEN_DIRTY=true`, you are asked first, with the file list.
   Reject and nothing runs — Copilot is never even launched.
 - A **checkpoint** is created at `refs/remote-agent/checkpoint-<taskId>`. This
   is a real commit object containing your tracked *and untracked* changes,
   written through a temporary `GIT_INDEX_FILE` so your working tree and your
-  staged index are **not touched at all**.
+  staged index are **not touched at all**. A re-run after a crash never
+  overwrites an existing checkpoint — your original recovery point survives.
 
 Recover from a checkpoint at any time:
 
 ```powershell
-git show refs/remote-agent/checkpoint-42            # inspect it
-git diff HEAD refs/remote-agent/checkpoint-42       # what was different
-git checkout refs/remote-agent/checkpoint-42 -- .   # restore everything
+git for-each-ref refs/remote-agent                   # list checkpoints
+git show refs/remote-agent/checkpoint-42             # inspect it
+git diff HEAD refs/remote-agent/checkpoint-42        # what was different
+git checkout refs/remote-agent/checkpoint-42 -- .    # restore everything
 ```
 
+Checkpoints older than 30 days are pruned automatically (the newest 10 per
+repository are always kept), so the agent cannot grow your repositories forever.
+
 After the agent finishes, tests and build run, then a commit is made only if
-everything passed. Commits exclude sensitive files. Pushing is off by default,
-and even with `AUTO_PUSH=true` every push requires an explicit approval tap.
+everything passed. **Only files the agent actually changed are staged** — the
+diff is taken against the checkpoint, so your own pre-existing edits are never
+swept into an automated commit. Commits exclude sensitive files and use
+`--no-verify` so repository hooks cannot execute. Pushing is off by default, and
+even with `AUTO_PUSH=true` every push requires an explicit approval tap.
 
 ---
 
@@ -511,28 +685,32 @@ otherwise. The application:
 
 ## 14. Usage limits
 
-The installed Copilot CLI has **no flag for a per-session credit cap** — only
-`--max-autopilot-continues`. So the caps are enforced by this application:
+Copilot CLI 1.0.79 added `--max-ai-credits`, which this agent passes through
+when your budget meets the CLI's documented 30-credit minimum. Below that, and
+for everything else, the caps are enforced by this application:
 
 | Guard | Mechanism | When it acts |
 |---|---|---|
 | `MAX_AI_CREDITS_PER_DAY` | Rolling 24 h ledger in SQLite | **Before** launching Copilot; the task fails fast with no AI call |
-| `MAX_AI_CREDITS_PER_TASK` | Cumulative usage from the CLI's `result` payload | Between invocations — blocks the next attempt/retry |
-| `MAX_TASK_DURATION_MINUTES` | Wall clock | Kills the process tree (`taskkill /T /F` on Windows) |
+| `MAX_AI_CREDITS_PER_TASK` ≥ 30 | Passed to the CLI as `--max-ai-credits` | In-process: the CLI blocks the next model call |
+| `MAX_AI_CREDITS_PER_TASK` < 30 | Cumulative usage from the CLI's result payload | Between invocations — blocks the next attempt/retry |
+| Usage not reported | Two consecutive runs with no usage figure | Task stops rather than spending blind |
+| `MAX_TASK_DURATION_MINUTES` | Wall clock, incl. verification | Kills the process tree; a watchdog resolves even if a child survives |
 | Turn ceiling | Counts `assistant.turn_start` events | Kills a runaway loop mid-session |
 | `MAX_AUTOPILOT_CONTINUES` | Passed to the CLI | The CLI's own runaway guard |
 | `MAX_RETRIES` | Bounded recovery loop | Stops after N failed verifications — never loops forever |
-| `MAX_CONCURRENT_TASKS` | Queue | Caps parallel spend |
-| Quota exhaustion | Detected in CLI stderr/exit | Stops immediately, no retry, notifies you |
+| Crash re-runs | `retry_count` carried across restarts | A task interrupted 3 times is abandoned, not re-billed forever |
+| Quota exhaustion | Detected in CLI stderr **and** a non-zero exit | Stops immediately, no retry, notifies you |
 
-**Honest limitation:** the CLI reports `usage.premiumRequests` only in its final
-`result` event, so the per-task credit cap is enforced *between* Copilot
-invocations, not mid-invocation. A single invocation is instead bounded by the
-duration limit, the turn ceiling and `--max-autopilot-continues`. With
-`MAX_AI_CREDITS_PER_TASK=10` and `MAX_RETRIES=2`, worst-case spend for one task
-is roughly one invocation's overshoot beyond the cap — not unbounded.
+Spend already incurred is **preserved across a crash**: a recovered task
+remembers what it cost before the interruption, and the restart banner tells you.
 
-Check anytime with `/usage`, `/status`, or `npm run agent -- status`.
+**Honest limitation:** below 30 credits the CLI cannot enforce a ceiling itself,
+so the per-task cap is applied *between* Copilot invocations. A single
+invocation is instead bounded by the duration limit, the turn ceiling and
+`--max-autopilot-continues`.
+
+Check anytime with `/usage`, `/status`, or `remote-agent status`.
 
 ---
 
@@ -544,17 +722,23 @@ Check anytime with `/usage`, `/status`, or `npm run agent -- status`.
 |---|---|
 | `Configuration error: TELEGRAM_BOT_TOKEN is not set` | Copy `.env.example` → `.env` and fill it in |
 | `AUTHORIZED_TELEGRAM_USER_ID is not set` | Get your id from @userinfobot. The agent refuses to start without it — by design |
-| Bot ignores you | Your id is not in the allow-list. Check `data/logs/agent-*.log` for `Rejected unauthorized Telegram request` |
+| Bot ignores you | Your id is not in the allow-list. Check `data/logs/agent-*.log` |
 | `Copilot CLI unavailable` | `npm install -g @github/copilot` |
 | `no account is signed in` | `copilot login` |
-| `Model … is not offered by this CLI build` | `npm run agent -- models`, then set a listed id |
-| Task fails with `No such agent` | Run `npm run agent -- install-agent`, or set `COPILOT_CUSTOM_AGENT=none` |
+| `Model … is not offered by this CLI build` | `remote-agent models`, then set a listed id. The CLI auto-updates and the catalogue changes |
+| `Model "X" from --model flag is not available` | The model is listed but refused right now — usually temporary rate limiting. The agent switches to `COPILOT_MODEL_FALLBACK` automatically; set that to a model you can actually use |
+| Copilot could not authenticate | Run `copilot login` on the PC, then `/retry`. The agent reports this as an auth failure and does not burn a retry on it |
+| Verification fails but the same command passes in a terminal | Fixed in this build: quoting a bare program name broke `%~dp0` inside `.cmd` shims (npm/yarn/pnpm/gradlew). If you see `node_modules\npm\bin\npm-prefix.js` in a log, you are on an older build |
+| Task fails with `No such agent` | `remote-agent install-agent`, or set `COPILOT_CUSTOM_AGENT=none` |
+| “Build/test definition changed” approval you did not expect | The agent edited `package.json`/a runner config. Inspect the diff before approving — that command runs as you |
+| Task refused: “unresolved merge conflict(s)” | Resolve the merge yourself; the agent will not touch a conflicted tree |
 | `Tests: not run (no test command detected)` | The project declares none. Add `--test "…"` when registering |
-| Tests pass locally but fail for the agent | The agent runs the command from the project root with `CI=1` |
-| Task stuck in `WAITING_APPROVAL` | Tap APPROVE/REJECT, or `/approve <id>`. Expires per `APPROVAL_TIMEOUT_MINUTES` |
-| `Another agent instance is already running` | `npm run agent -- stop`, or delete `data/agent.pid` if the process is gone |
-| Nothing happens while travelling | The PC slept or signed out. Check power settings and the scheduled task |
-| Telegram network errors in the log | Normal transient drops; grammY reconnects automatically |
+| Build fails only under the agent | The child gets an allow-listed environment. If it needs a specific variable, add it to `COPILOT_ENV_PASSTHROUGH` |
+| Tasks stopped after “no usage figure” | The CLI changed its output format. Run `remote-agent doctor` and update |
+| Task stuck in `WAITING_APPROVAL` | Tap APPROVE/REJECT, or `/approve <id>`. Expires per `APPROVAL_TIMEOUT_MINUTES`; a restart cancels stranded ones |
+| `Another agent instance is already running` | `remote-agent stop`. A stale lock from a power cut is detected and reclaimed automatically |
+| Nothing happens while travelling | Check `/status` — it reports the real connection state and how long Telegram has been quiet |
+| Telegram network errors in the log | Normal transient drops; grammY reconnects and `/status` shows `RECONNECTING` |
 
 Logs: `data/logs/agent-YYYY-MM-DD.log` (JSON lines, redacted).
 Per-task detail: `npm run agent -- logs <id>` or `/logs <id>`.
@@ -582,9 +766,13 @@ The database migrates itself on start.
 ## 17. Recovery
 
 **A task was interrupted (crash, reboot, power cut).** On restart the agent
-finds tasks left in `RUNNING`/`TESTING`, re-queues them and logs
-`Runner restarted while task was in flight`. Because a task can only be picked
-up through a single atomic claim, it can never be executed twice.
+finds tasks left in `RUNNING`/`TESTING`, re-queues them, and tells you on
+Telegram how many credits each had already spent and the exact command to
+restore your pre-task snapshot. A task interrupted more than three times is
+**abandoned rather than re-run**, so a boot loop cannot silently re-bill it.
+Because a task can only be picked up through a single atomic claim, it can never
+be executed twice concurrently. Tasks left awaiting approval by a restart are
+cancelled (the waiter only lives in memory) and you are told.
 
 **The agent damaged something / you want your work back.** Every task creates a
 checkpoint:
@@ -630,29 +818,45 @@ modified by uninstalling.
 
 ## 19. Known limitations
 
-1. **`claude-opus-5` does not exist** in Copilot CLI 1.0.79's model catalogue.
-   The strongest available Claude model is `claude-opus-4.8`. The system is
-   built so switching is a one-line `.env` change if that changes.
-2. **Per-task credit caps act between Copilot invocations**, not mid-invocation,
-   because the CLI only reports usage in its final `result` event. Duration and
-   turn limits bound a single invocation. See [Usage limits](#14-usage-limits).
-3. **Approval is at the task boundary**, not per tool call. The Copilot CLI's
-   permission model is declared up front, so an individual mid-run tool call
-   cannot be interactively approved. Risky *requests* are gated before they
-   start, and the deny-list is the hard enforcement layer throughout.
-4. **The PC must be on and signed in.** A logon-triggered task cannot run at a
+1. **The model catalogue changes between CLI versions, and the CLI auto-updates.**
+   `claude-opus-5` exists in 1.0.79 and is the default; it did not exist in
+   1.0.63. Re-run `remote-agent models` after an update.
+2. **The deny-list is not a sandbox.** With `COPILOT_SANDBOX=false` (the
+   default) shell commands run with your full user rights; the deny-list and
+   path scoping are defence in depth only. Turn the sandbox on for real
+   containment — it is experimental and may break some builds. Concretely: the
+   list denies `curl`, `wget` and the interpreters, but **not** `npm`, `pip`,
+   `cargo`, `go`, `make`, `mvn` or `gradle`, which are each capable of fetching
+   from the network and running arbitrary code. Denying them would stop the
+   agent doing its job. Do not read the deny-list as a network policy.
+3. **The read-only guarantee for advisory passes is verified, but not total.**
+   The explorer and reviewer are checked before and after against git's changed
+   -file set, and against git's control surface. That catches edits to tracked
+   and untracked files and to `.git/`. It does **not** see writes to
+   **gitignored** paths (e.g. inside `node_modules/`), writes **outside** the
+   repository, or a file modified and restored within the same session.
+3. **Verification executes project code.** Running your project's own tests
+   after an agent edited your project inherently runs agent-influenced code —
+   that is the feature. The manifest gate catches the test/build *entry point*
+   being redirected; it cannot fingerprint the transitive closure of everything
+   a test suite touches. The sandbox is what contains the rest.
+4. **Per-task credit caps below 30 act between Copilot invocations**, not
+   mid-invocation. Duration and turn limits bound a single invocation.
+5. **Approval is at the task boundary**, not per tool call — the Copilot CLI's
+   permission model is declared up front.
+6. **The PC must be on and signed in.** A logon-triggered task cannot run at a
    locked login screen after a reboot.
-5. **Verification only runs commands your project declares** (`package.json`
+7. **Verification only runs commands your project declares** (`package.json`
    scripts, `pom.xml`, `build.gradle`, `Cargo.toml`, `go.mod`, `*.csproj`,
-   `pyproject.toml`, `Makefile`) or that you configure per project. It never
-   guesses.
-6. **Natural-language routing is rule-based.** If a message does not clearly name
+   `pyproject.toml`, `Makefile`) or that you configure per project.
+8. **Natural-language routing is rule-based.** If a message does not clearly name
    one registered project, you are asked rather than guessed at.
-7. **Single user, single machine** by design. No multi-tenancy, no SaaS.
-8. **Web dashboard is not implemented** (config keys are reserved). The CLI and
-   Telegram cover observability; a dashboard would be local-only and free.
-9. **Windows-first.** macOS/Linux code paths are implemented but the startup
-   automation ships only for Windows.
+9. **A conflicted repository is refused**, not resolved. That is deliberate.
+10. **Single user, single machine** by design. No multi-tenancy, no SaaS.
+11. **Web dashboard is not implemented** (config keys are reserved). The CLI and
+    Telegram cover observability.
+12. **Windows-first.** macOS/Linux code paths are implemented but the startup
+    automation ships only for Windows.
 
 ---
 
@@ -662,28 +866,53 @@ modified by uninstalling.
 npm test
 ```
 
-113 automated tests, all passing. No real Copilot session is started, so the
-suite consumes **zero AI credits**.
+**306 automated tests, all passing** (lint + build + tests). No real Copilot
+session is started, so the suite consumes **zero AI credits**.
 
-Coverage includes: authorization and unauthorized-user rejection, unauthorized
-throttling, secret redaction, sensitive-file detection, project registry
-containment and path-traversal rejection, task creation, state machine, atomic
-claiming, crash recovery, update de-duplication, usage ledger, permission-flag
-construction, Copilot argv construction, JSONL stream parsing, model
-discovery/selection, git status/checkpoint/staging, risk classification,
-approval approve/reject/expire, test-command detection across ecosystems,
-natural-language parsing, prompt construction and configuration validation.
+Coverage includes: authorization and unauthorized-user rejection, secret
+redaction, sensitive-file detection, project-registry containment, path
+traversal, UNC/8.3/junction rejection, shell-metacharacter rejection in
+operator-configured commands, cmd.exe quoting (injection attempts), the child
+environment allow-list and code-injection variable denial, the Copilot
+permission policy (interpreters, write denies, URL denies), argv construction
+including `--max-ai-credits` and `--sandbox`, JSONL stream parsing, usage
+fallback via `session.shutdown`, model discovery/selection, build-manifest
+integrity, the single-instance lock (including recycled PIDs), database
+retention, per-project serialisation, crash-recovery re-run caps, approval
+approve/reject/expire/abort/ownership, git status parsing (renames, non-ASCII
+filenames, 600-file staging, checkpoint preservation), test-command detection
+across ecosystems, natural-language parsing and configuration validation.
 
 The end-to-end suite drives the real `TaskRunner` against a **mock Copilot CLI**
-in a real temporary git repository and asserts the whole pipeline: edit →
-verify → commit → report, retry-then-stop on failing tests, quota stop, daily
-budget refusal, dirty-repo approval and abort, checkpoint recoverability, `.env`
-exclusion from commits, cancellation, timeout, no-op tasks, protected-branch
-approval, and single-execution guarantees under the queue.
+in a real temporary git repository and asserts: edit → verify → commit → report,
+retry-then-stop on failing tests, quota stop, daily-budget refusal, dirty-repo
+approval and abort, checkpoint recoverability, `.env` exclusion, cancellation,
+timeout, no-op tasks, protected-branch approval, **refusal to touch a repository
+with merge conflicts**, **refusal to run a test command the agent rewrote**,
+**authentication failure reported as itself rather than as a billing problem**,
+**automatic model fallback when the API refuses a catalogued model**, and
+single-execution guarantees under the queue.
 
-A separate live acceptance check was run against the **real** Copilot CLI
-(v1.0.79): it fixed a genuine bug in a scratch repository, the project's tests
-passed, and the change was committed — 0.33 AI credits.
+### Live acceptance (spends real credits)
+
+```powershell
+node scripts/live-acceptance.mjs   # ~1-2 AI credits, manual only
+```
+
+This is the only test that starts a real Copilot session. It creates a
+throwaway git repository containing a genuinely broken `slugify()`, runs the
+real `TaskRunner`, and asserts nine properties: the task completed, a commit was
+created, **the tests really pass afterwards**, the intended file was fixed, the
+test file was *not* edited, the bot token never appeared in any Telegram
+message, credits were accounted for, no git hook was installed, and a checkpoint
+ref exists.
+
+Most recent run: **9/9 passed**, 1.00 AI credit, 92 s, Copilot CLI 1.0.79.
+
+Run it after touching the runner, permissions, git handling or `execCommand`.
+The mocked suite deliberately cannot catch environment or shell-quoting faults
+— a bug that made *every* npm/yarn/pnpm/gradlew verification fail was invisible
+to 247 passing unit tests and was caught here.
 
 ---
 

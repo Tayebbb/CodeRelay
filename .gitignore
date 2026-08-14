@@ -16,3 +16,7 @@ Thumbs.db
 
 # Copilot session artifacts
 copilot-session-*.md
+
+# Throwaway repos created by scripts/live-acceptance.mjs (spends real credits)
+.live-acceptance-*/
+.scratch-perm/

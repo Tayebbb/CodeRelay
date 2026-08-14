@@ -6,10 +6,10 @@
 
 $ErrorActionPreference = 'Stop'
 
-$root      = Split-Path -Parent $PSScriptRoot
-$taskName  = 'RemotePersonalCodingAgent'
-$nodeExe   = (Get-Command node -ErrorAction Stop).Source
-$entry     = Join-Path $root 'dist\src\main.js'
+$root = Split-Path -Parent $PSScriptRoot
+$taskName = 'RemotePersonalCodingAgent'
+$nodeExe = (Get-Command node -ErrorAction Stop).Source
+$entry = Join-Path $root 'dist\src\main.js'
 
 if (-not (Test-Path $entry)) {
     Write-Error "Not built yet. Run `npm install` and `npm run build` in $root first."

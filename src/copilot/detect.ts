@@ -16,7 +16,10 @@ export interface CopilotLauncher {
   baseArgs: string[];
   /** Human-readable description of what was resolved. */
   description: string;
-  /** True when the launcher is shell-free (safe for untrusted prompt text). */
+  /**
+   * Always true. Retained so callers can assert it; a launcher that would need a
+   * shell is never constructed, because untrusted prompt text is passed in argv.
+   */
   safe: boolean;
 }
 
@@ -58,12 +61,26 @@ function candidateModuleRoots(): string[] {
 
 function findPackageEntry(): string | null {
   for (const root of candidateModuleRoots()) {
-    for (const entry of ['npm-loader.js', 'index.js']) {
-      const candidate = path.join(root, '@github', 'copilot', entry);
-      if (existsFile(candidate)) return path.resolve(candidate);
-    }
+    const found = findPackageEntryIn(root);
+    if (found) return found;
   }
   return null;
+}
+
+function findPackageEntryIn(moduleRoot: string): string | null {
+  for (const entry of ['npm-loader.js', 'index.js']) {
+    const candidate = path.join(moduleRoot, '@github', 'copilot', entry);
+    if (existsFile(candidate)) return path.resolve(candidate);
+  }
+  return null;
+}
+
+/** Find the package entry next to a shim (npm puts it in ./node_modules). */
+function findPackageEntryNear(binDir: string): string | null {
+  return (
+    findPackageEntryIn(path.join(binDir, 'node_modules')) ??
+    findPackageEntryIn(path.join(binDir, '..', 'lib', 'node_modules'))
+  );
 }
 
 function findExecutable(): string | null {
@@ -82,28 +99,28 @@ export function resolveLauncher(override?: string | null): CopilotLauncher | nul
   if (override) {
     const resolved = path.resolve(override);
     if (!existsFile(resolved)) return null;
+
     if (resolved.endsWith('.js')) {
-      return {
-        command: process.execPath,
-        baseArgs: [resolved],
-        description: `node ${resolved}`,
-        safe: true,
-      };
+      return { command: process.execPath, baseArgs: [resolved], description: `node ${resolved}`, safe: true };
     }
+
+    // A .cmd/.ps1/.bat shim would require `shell: true`, which would let shell
+    // metacharacters in a task prompt execute. Resolve the shim's real JS entry
+    // point instead; if that is not possible, refuse rather than downgrade.
     if (resolved.endsWith('.cmd') || resolved.endsWith('.ps1') || resolved.endsWith('.bat')) {
-      return { command: resolved, baseArgs: [], description: resolved, safe: false };
+      const sibling = findPackageEntryNear(path.dirname(resolved));
+      if (sibling) {
+        return { command: process.execPath, baseArgs: [sibling], description: `node ${sibling}`, safe: true };
+      }
+      return null;
     }
+
     return { command: resolved, baseArgs: [], description: resolved, safe: true };
   }
 
   const entry = findPackageEntry();
   if (entry) {
-    return {
-      command: process.execPath,
-      baseArgs: [entry],
-      description: `node ${entry}`,
-      safe: true,
-    };
+    return { command: process.execPath, baseArgs: [entry], description: `node ${entry}`, safe: true };
   }
 
   const exe = findExecutable();
@@ -127,7 +144,7 @@ export function runLauncher(
     const child = spawn(launcher.command, [...launcher.baseArgs, ...args], {
       cwd: options.cwd,
       env: { ...process.env, NO_COLOR: '1', ...options.env },
-      shell: !launcher.safe,
+      shell: false,
       windowsHide: true,
     });
 

@@ -39,11 +39,22 @@ export interface TelegramBotDeps {
 }
 
 const MAX_PROMPT_LENGTH = 4000;
+const MAX_QUEUED_TASKS = 20;
+
+/** Bound on outbox pages per flush, so a huge backlog cannot spin forever. */
+const MAX_OUTBOX_PAGES = 50;
 
 export class TelegramBot implements Notifier {
   private readonly bot: Bot;
   private readonly throttle = new UnauthorizedThrottle();
   private connection: ConnectionState = 'DISCONNECTED';
+  private lastActivityAt = 0;
+  private lastApiOkAt = 0;
+  private healthTimer: NodeJS.Timeout | null = null;
+  private stopping = false;
+  private flushing = false;
+  /** Detached approval flows, awaited on shutdown so their writes are not lost. */
+  private readonly pendingApprovalFlows = new Set<Promise<void>>();
 
   constructor(private readonly deps: TelegramBotDeps) {
     this.bot = new Bot(deps.config.telegram.botToken);
@@ -68,12 +79,67 @@ export class TelegramBot implements Notifier {
   // ---------------------------------------------------------------- Notifier
 
   async sendMessage(chatId: number, text: string): Promise<void> {
+    const body = clampMessage(redact(text));
     try {
-      await this.bot.api.sendMessage(chatId, clampMessage(redact(text)), {
-        link_preview_options: { is_disabled: true },
-      });
+      await this.bot.api.sendMessage(chatId, body, { link_preview_options: { is_disabled: true } });
+      this.lastApiOkAt = Date.now();
+      this.connection = 'CONNECTED';
+      void this.flushOutbox();
     } catch (err) {
+      // A task can finish while Telegram is unreachable. Keep the message so the
+      // operator still learns the outcome instead of silently losing it.
+      if (this.isTransient(err)) {
+        this.connection = 'RECONNECTING';
+        try {
+          this.deps.tasks.enqueueOutbox(chatId, body);
+        } catch (dbErr) {
+          log.error('Could not queue an undelivered message', { error: errorMessage(dbErr) });
+        }
+      }
       log.warn('Could not deliver message', { chatId, error: errorMessage(err) });
+    }
+  }
+
+  /** Network trouble is worth retrying; a rejected payload is not. */
+  private isTransient(err: unknown): boolean {
+    if (err instanceof GrammyError) return err.error_code === 429 || err.error_code >= 500;
+    return true;
+  }
+
+  /** Deliver anything queued while Telegram was unreachable. */
+  private async flushOutbox(): Promise<void> {
+    if (this.flushing || this.stopping) return;
+    this.flushing = true;
+    try {
+      // Keep going until the queue is empty. `pendingOutbox()` returns a page,
+      // and a single page was not enough: after a long outage the message that
+      // actually matters (the final report) sits behind a hundred progress
+      // pings and was never reached, because nothing re-triggered the flush.
+      for (let page = 0; page < MAX_OUTBOX_PAGES; page += 1) {
+        const batch = this.deps.tasks.pendingOutbox();
+        if (batch.length === 0) return;
+
+        let delivered = 0;
+        for (const message of batch) {
+          if (this.stopping) return;
+          try {
+            await this.bot.api.sendMessage(message.chatId, message.body, {
+              link_preview_options: { is_disabled: true },
+            });
+            this.deps.tasks.dropOutbox(message.id);
+            delivered += 1;
+          } catch (err) {
+            this.deps.tasks.failOutboxAttempt(message.id);
+            log.warn('Outbox delivery failed; will retry', { error: errorMessage(err) });
+            return;
+          }
+        }
+        if (delivered === 0) return;
+      }
+    } catch (err) {
+      log.error('Outbox flush failed', { error: errorMessage(err) });
+    } finally {
+      this.flushing = false;
     }
   }
 
@@ -102,15 +168,27 @@ export class TelegramBot implements Notifier {
       await this.bot.api.sendMessage(request.chatId, clampMessage(redact(body)), { reply_markup: keyboard });
     } catch (err) {
       log.error('Could not deliver approval request', { taskId: request.taskId, error: errorMessage(err) });
+      // Rethrow: a card nobody received cannot be answered, and silently
+      // returning left the task holding the only queue slot for the full
+      // approval timeout (an hour by default) waiting for a tap that could
+      // never come. The caller treats this as "not approved" immediately.
+      throw err;
     }
   }
 
   // ---------------------------------------------------------------- lifecycle
 
-  async start(): Promise<void> {
-    const me = await this.bot.api.getMe();
+  async start(options: { onReady?: () => void } = {}): Promise<void> {
+    // A logon-triggered start often races the network coming up, so a transient
+    // failure must not kill the process into a restart loop. A 401 is fatal and
+    // is reported as such rather than retried forever.
+    const me = await this.callWithRetry(() => this.bot.api.getMe());
     this.connection = 'CONNECTED';
+    this.lastApiOkAt = Date.now();
     log.info('Telegram bot online', { username: me.username });
+
+    this.healthTimer = setInterval(() => this.evaluateHealth(), 30_000);
+    this.healthTimer.unref?.();
 
     await this.bot.start({
       // Long polling: the PC dials out. No inbound port, no public endpoint.
@@ -118,17 +196,102 @@ export class TelegramBot implements Notifier {
       drop_pending_updates: false,
       onStart: () => {
         this.connection = 'CONNECTED';
+        this.lastApiOkAt = Date.now();
+        void this.flushOutbox();
+        options.onReady?.();
       },
     });
   }
 
-  async stop(): Promise<void> {
+  /** Retry transient Telegram failures with backoff; surface fatal ones. */
+  private async callWithRetry<T>(fn: () => Promise<T>, attempts = 8): Promise<T> {
+    let delay = 2_000;
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await fn();
+      } catch (err) {
+        const fatal =
+          err instanceof GrammyError && (err.error_code === 401 || err.error_code === 403 || err.error_code === 409);
+        if (fatal) {
+          log.error('Telegram rejected the bot token or another instance is polling', {
+            error: redact(err.description),
+          });
+          throw err;
+        }
+        if (attempt >= attempts) throw err;
+        this.connection = 'RECONNECTING';
+        log.warn('Telegram unreachable; retrying', { attempt, delayMs: delay, error: errorMessage(err) });
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        delay = Math.min(delay * 2, 60_000);
+      }
+    }
+  }
+
+  /**
+   * grammY retries polling failures internally and does not surface them, so
+   * without this the reported state would always read CONNECTED during an
+   * outage. Silence beyond the threshold is treated as a lost connection and
+   * confirmed with a cheap API call.
+   */
+  private evaluateHealth(): void {
+    if (this.stopping) return;
+    const quietFor = Date.now() - Math.max(this.lastApiOkAt, this.lastActivityAt);
+    if (quietFor < 120_000) return;
+
+    void this.bot.api
+      .getMe()
+      .then(() => {
+        this.lastApiOkAt = Date.now();
+        if (this.connection !== 'CONNECTED') {
+          log.info('Telegram connection restored');
+          void this.flushOutbox();
+        }
+        this.connection = 'CONNECTED';
+      })
+      .catch((err) => {
+        if (this.connection === 'CONNECTED') {
+          log.warn('Telegram connection lost; grammY will keep retrying', { error: errorMessage(err) });
+        }
+        this.connection = 'RECONNECTING';
+      });
+  }
+
+  /**
+   * Stop accepting updates. Called first during shutdown so no new task or
+   * approval can be created while in-flight work is being drained.
+   */
+  async stopAcceptingUpdates(): Promise<void> {
+    this.stopping = true;
+    if (this.healthTimer) {
+      clearInterval(this.healthTimer);
+      this.healthTimer = null;
+    }
     this.connection = 'DISCONNECTED';
     await this.bot.stop();
   }
 
+  /** Let detached approval flows finish writing, bounded so shutdown cannot hang. */
+  async drainApprovalFlows(graceMs = 5_000): Promise<void> {
+    if (this.pendingApprovalFlows.size === 0) return;
+    await Promise.race([
+      Promise.allSettled([...this.pendingApprovalFlows]),
+      new Promise((resolve) => setTimeout(resolve, graceMs).unref?.()),
+    ]);
+  }
+
+  async stop(): Promise<void> {
+    await this.stopAcceptingUpdates();
+    await this.drainApprovalFlows();
+  }
+
   connectionState(): ConnectionState {
     return this.connection;
+  }
+
+  /** Milliseconds since the last confirmed contact with Telegram. */
+  quietForMs(): number {
+    const last = Math.max(this.lastApiOkAt, this.lastActivityAt);
+    return last === 0 ? 0 : Date.now() - last;
   }
 
   async notifyOperators(text: string): Promise<void> {
@@ -144,15 +307,32 @@ export class TelegramBot implements Notifier {
       const decision = authorize(ctx.from?.id, this.deps.config.telegram.authorizedUserIds);
 
       if (!decision.allowed) {
-        log.warn('Rejected unauthorized Telegram request', {
-          userId: ctx.from?.id ?? null,
-          username: ctx.from?.username ?? null,
-        });
-        // Say nothing useful: no project names, no status, no hint that this is
-        // a control channel for a real machine.
-        if (ctx.from?.id && this.throttle.shouldRespond(ctx.from.id)) {
+        // Logging every stranger's message would let anyone who knows the bot
+        // username fill the disk, so the log is throttled with the reply.
+        const shouldReport = ctx.from?.id !== undefined && this.throttle.shouldRespond(ctx.from.id);
+        if (shouldReport) {
+          log.warn('Rejected unauthorized Telegram request', {
+            userId: ctx.from?.id ?? null,
+            username: ctx.from?.username ?? null,
+          });
+          // Say nothing useful: no project names, no status, no hint that this
+          // is a control channel for a real machine.
           await ctx.reply('This bot is private.').catch(() => {});
         }
+        return;
+      }
+
+      this.lastActivityAt = Date.now();
+
+      // Authorisation is per-user, but delivery is per-CHAT. In a group, every
+      // progress update, diff excerpt and approval card would be readable by
+      // every member, even though only the operator can issue commands.
+      const chatType = ctx.chat?.type;
+      if (chatType && chatType !== 'private') {
+        log.warn('Refused to operate in a non-private chat', { chatType, chatId: ctx.chat?.id ?? null });
+        await ctx
+          .reply('This bot only works in a direct message, because it reports file contents and diffs.')
+          .catch(() => {});
         return;
       }
 
@@ -188,11 +368,12 @@ export class TelegramBot implements Notifier {
       const lines = [
         '🖥 Agent status',
         '',
-        `Connection: ${this.connection}`,
+        `Connection: ${this.connection}${this.connection !== 'CONNECTED' ? ` (quiet for ${formatDuration(this.quietForMs())})` : ''}`,
         `Uptime: ${formatDuration(Date.now() - this.deps.startedAt)}`,
         `Copilot CLI: ${copilot.installed ? `v${copilot.version}` : 'NOT INSTALLED'}`,
         `Copilot account: ${copilot.authenticatedUser ?? 'not signed in'}`,
         `Model: ${selection.model}${selection.fellBack ? ` (fallback from ${selection.requested})` : ''}`,
+        `Sandbox: ${config.copilot.sandbox ? 'on (experimental)' : 'off'}`,
         '',
         `Running: ${active.length > 0 ? active.map((id) => `#${id}`).join(', ') : 'none'}`,
         `Queued: ${queued}`,
@@ -257,11 +438,16 @@ export class TelegramBot implements Notifier {
       if (runner.isRunning(id)) {
         runner.cancel(id);
         await ctx.reply(`🚫 Cancelling task #${id}…`);
-      } else {
-        tasks.transition(id, 'CANCELLED', { error: 'Cancelled by operator before execution.' });
-        approvals.resolve(id, 'REJECTED');
-        await ctx.reply(`🚫 Task #${id} cancelled.`);
+        return;
       }
+
+      // Not running: it may be queued, or parked on a pre-execution approval.
+      approvals.resolve(id, 'REJECTED', ctx.from?.id);
+      const latest = tasks.get(id);
+      if (latest && !isTerminal(latest.status)) {
+        tasks.transition(id, 'CANCELLED', { error: 'Cancelled by operator before execution.' });
+      }
+      await ctx.reply(`🚫 Task #${id} cancelled.`);
     });
 
     this.bot.command('retry', async (ctx) => {
@@ -271,15 +457,31 @@ export class TelegramBot implements Notifier {
       if (!task) return void (await ctx.reply(`Task #${id} not found.`));
       if (!isTerminal(task.status)) return void (await ctx.reply(`Task #${id} is still ${task.status}.`));
 
+      projects.load();
+      const project = projects.getById(task.projectId);
+      if (!project) return void (await ctx.reply('That project is no longer registered.'));
+
+      // Re-assess: a retry must not launder a previously rejected or
+      // risk-flagged prompt past the approval gate.
+      const risk = assessRisk(task.prompt);
+      const needsApproval = config.safety.requireApprovalForDangerousActions && risk.level === 'elevated';
+
       const created = tasks.create({
         userId: task.userId,
         chatId: task.chatId,
         projectId: task.projectId,
         prompt: task.prompt,
-        approvalRequired: false,
-        approvalReason: null,
+        approvalRequired: needsApproval,
+        approvalReason: risk.reason,
       });
       tasks.addEvent(created.id, 'retry', `Re-queued from task #${id}`);
+
+      if (needsApproval) {
+        await ctx.reply(`🔁 Re-queued as task #${created.id} — approval still required.`);
+        void this.awaitTaskApproval(created.id, task.chatId, project.name, risk.reason, task.prompt);
+        return;
+      }
+
       queue.kick();
       await ctx.reply(`🔁 Re-queued as task #${created.id}.`);
     });
@@ -310,22 +512,36 @@ export class TelegramBot implements Notifier {
 
   private registerCallbacks(): void {
     this.bot.on('callback_query:data', async (ctx) => {
-      const data = ctx.callbackQuery.data;
-      const match = /^(approve|reject):(\d+)$/.exec(data);
-      if (!match) return void (await ctx.answerCallbackQuery());
-
-      const decision = match[1] === 'approve' ? 'APPROVED' : 'REJECTED';
-      const taskId = Number.parseInt(match[2]!, 10);
-      const handled = this.deps.approvals.resolve(taskId, decision);
-
-      await ctx.answerCallbackQuery({
-        text: handled ? `Task #${taskId}: ${decision}` : `No pending request for #${taskId}`,
-      });
+      // Telegram shows a spinner until answerCallbackQuery runs, so it must
+      // happen on every path including failures.
+      let note = 'Done';
       try {
-        await ctx.editMessageReplyMarkup({ reply_markup: undefined });
-        await ctx.reply(`${decision === 'APPROVED' ? '✅' : '❌'} Task #${taskId} ${decision.toLowerCase()}.`);
-      } catch {
-        // The original message may be gone; the decision is already recorded.
+        const data = ctx.callbackQuery.data;
+        const match = /^(approve|reject):(\d+)$/.exec(data);
+        if (!match) return void (await ctx.answerCallbackQuery());
+
+        const decision = match[1] === 'approve' ? 'APPROVED' : 'REJECTED';
+        const taskId = Number.parseInt(match[2]!, 10);
+        const result = this.deps.approvals.resolve(taskId, decision, ctx.from?.id);
+
+        note =
+          result === 'resolved'
+            ? `Task #${taskId}: ${decision}`
+            : result === 'forbidden'
+              ? `Task #${taskId} belongs to another operator`
+              : `No pending request for #${taskId}`;
+
+        await ctx.answerCallbackQuery({ text: note });
+
+        if (result === 'resolved') {
+          await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => {});
+          await ctx
+            .reply(`${decision === 'APPROVED' ? '✅' : '❌'} Task #${taskId} ${decision.toLowerCase()}.`)
+            .catch(() => {});
+        }
+      } catch (err) {
+        log.error('Callback handling failed', { error: errorMessage(err) });
+        await ctx.answerCallbackQuery({ text: 'Something went wrong.' }).catch(() => {});
       }
     });
   }
@@ -354,11 +570,23 @@ export class TelegramBot implements Notifier {
     });
   }
 
-  private async decide(raw: string, decision: 'APPROVED' | 'REJECTED', ctx: { reply: (t: string) => Promise<unknown> }) {
+  private async decide(
+    raw: string,
+    decision: 'APPROVED' | 'REJECTED',
+    ctx: { from?: { id: number }; reply: (t: string) => Promise<unknown> },
+  ) {
     const id = Number.parseInt(raw, 10);
-    if (Number.isNaN(id)) return void (await ctx.reply(`Usage: /${decision === 'APPROVED' ? 'approve' : 'reject'} <task id>`));
-    const handled = this.deps.approvals.resolve(id, decision);
-    await ctx.reply(handled ? `Task #${id}: ${decision}.` : `No pending approval for task #${id}.`);
+    if (Number.isNaN(id)) {
+      return void (await ctx.reply(`Usage: /${decision === 'APPROVED' ? 'approve' : 'reject'} <task id>`));
+    }
+    const result = this.deps.approvals.resolve(id, decision, ctx.from?.id);
+    await ctx.reply(
+      result === 'resolved'
+        ? `Task #${id}: ${decision}.`
+        : result === 'forbidden'
+          ? `Task #${id} belongs to another operator.`
+          : `No pending approval for task #${id}.`,
+    );
   }
 
   private async enqueue(
@@ -374,6 +602,15 @@ export class TelegramBot implements Notifier {
     const project = projects.getById(projectId);
     if (!project) return void (await ctx.reply('That project is no longer registered.'));
 
+    // A runaway client (or a fat-fingered burst) must not be able to fill the
+    // queue and the database.
+    const queued = tasks.listByStatus('QUEUED').length + tasks.listByStatus('WAITING_APPROVAL').length;
+    if (queued >= MAX_QUEUED_TASKS) {
+      return void (await ctx.reply(
+        `There are already ${queued} tasks waiting. Let them finish, or cancel some with /cancel <id>.`,
+      ));
+    }
+
     const risk = assessRisk(prompt);
     const needsApproval = config.safety.requireApprovalForDangerousActions && risk.level === 'elevated';
 
@@ -388,27 +625,74 @@ export class TelegramBot implements Notifier {
 
     if (needsApproval) {
       await ctx.reply(`Task #${task.id} queued for ${project.name} — approval required.`);
+      // Fire-and-forget: grammY handles updates sequentially, so awaiting the
+      // decision here would block the callback_query that delivers it.
+      void this.awaitTaskApproval(task.id, ctx.chat.id, project.name, risk.reason, prompt);
+      return;
+    }
+
+    await ctx.reply(`✅ Task #${task.id} queued for ${project.name}.`);
+    queue.kick();
+  }
+
+  /** Runs detached from the update loop. Never throws into a handler. */
+  private async awaitTaskApproval(
+    taskId: number,
+    chatId: number,
+    projectName: string,
+    reason: string | null,
+    prompt: string,
+  ): Promise<void> {
+    const flow = this.runApprovalFlow(taskId, chatId, projectName, reason, prompt);
+    this.pendingApprovalFlows.add(flow);
+    try {
+      await flow;
+    } finally {
+      this.pendingApprovalFlows.delete(flow);
+    }
+  }
+
+  private async runApprovalFlow(
+    taskId: number,
+    chatId: number,
+    projectName: string,
+    reason: string | null,
+    prompt: string,
+  ): Promise<void> {
+    const { tasks, queue } = this.deps;
+    try {
       const outcome = await this.deps.approvals.request({
-        taskId: task.id,
-        chatId: ctx.chat.id,
+        taskId,
+        chatId,
         title: 'Potentially sensitive task',
-        project: project.name,
-        reason: risk.reason ?? 'Flagged by the risk classifier',
+        project: projectName,
+        reason: reason ?? 'Flagged by the risk classifier',
         details: [`Request: ${truncate(prompt, 300)}`],
       });
 
+      const current = tasks.get(taskId);
+      if (!current || isTerminal(current.status)) return;
+
       if (outcome !== 'APPROVED') {
-        tasks.transition(task.id, 'CANCELLED', {
+        tasks.transition(taskId, 'CANCELLED', {
           error: outcome === 'REJECTED' ? 'Rejected by operator.' : 'Approval expired.',
         });
-        await this.sendMessage(ctx.chat.id, `🚫 Task #${task.id} ${outcome.toLowerCase()} — nothing was executed.`);
+        await this.sendMessage(chatId, `🚫 Task #${taskId} ${outcome.toLowerCase()} — nothing was executed.`);
         return;
       }
-      tasks.transition(task.id, 'QUEUED');
-    } else {
-      await ctx.reply(`✅ Task #${task.id} queued for ${project.name}.`);
-    }
 
-    queue.kick();
+      tasks.transition(taskId, 'QUEUED');
+      queue.kick();
+    } catch (err) {
+      log.error('Approval flow failed', { taskId, error: errorMessage(err) });
+      try {
+        const current = tasks.get(taskId);
+        if (current && !isTerminal(current.status)) {
+          tasks.transition(taskId, 'FAILED', { error: 'Approval flow failed.' });
+        }
+      } catch {
+        // Nothing further we can do.
+      }
+    }
   }
 }

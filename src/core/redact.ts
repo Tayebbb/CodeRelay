@@ -5,6 +5,8 @@
  * This is defence-in-depth, not a guarantee: the primary protection is that we
  * never deliberately read `.env` files or credential stores.
  */
+import fs from 'node:fs';
+import path from 'node:path';
 
 /** Literal secret values registered at runtime (bot token, etc.). */
 const literalSecrets = new Set<string>();
@@ -87,4 +89,61 @@ const SENSITIVE_FILE_RE =
 
 export function isSensitiveFile(filePath: string): boolean {
   return SENSITIVE_FILE_RE.test(filePath.replace(/\\/g, '/'));
+}
+
+/** Secret-bearing files we read ONLY to learn what must never be echoed. */
+const SECRET_SOURCE_FILES = [
+  '.env',
+  '.env.local',
+  '.env.development',
+  '.env.production',
+  '.env.test',
+  '.npmrc',
+  '.netrc',
+];
+
+/** Ceiling on values learned from an untrusted repository. */
+const MAX_PROJECT_SECRETS = 200;
+
+/**
+ * Learn the project's own secret values so `redact()` can strip them.
+ *
+ * Pattern matching cannot recognise an arbitrary value like
+ * `DB_PASSWORD=correct-horse`. Reading the project's `.env` lets us register the
+ * literal values, so if the agent ever echoes one it is removed from every
+ * message, log and stored record. The values are held in memory only and are
+ * never written anywhere.
+ */
+export function registerProjectSecrets(root: string): number {
+  let learned = 0;
+
+  for (const name of SECRET_SOURCE_FILES) {
+    let contents: string;
+    try {
+      contents = fs.readFileSync(path.join(root, name), 'utf8');
+    } catch {
+      continue;
+    }
+
+    for (const rawLine of contents.split(/\r?\n/)) {
+      // The file belongs to a repository we do not trust. redact() compiles one
+      // regex per secret per call and runs on every progress event, so an
+      // enormous .env would both stall the bot and blank out so much text that
+      // the operator loses visibility. Learn a bounded number and stop.
+      if (learned >= MAX_PROJECT_SECRETS) return learned;
+
+      const line = rawLine.trim();
+      if (!line || line.startsWith('#')) continue;
+
+      const match = /^(?:export\s+)?[A-Za-z_][A-Za-z0-9_.-]*\s*[:=]\s*(.*)$/.exec(line);
+      const value = (match?.[1] ?? '').trim().replace(/^["']|["']$/g, '');
+      // Short or obviously non-secret values would cause noisy over-redaction.
+      if (value.length >= 8 && !/^(true|false|localhost|undefined|null)$/i.test(value)) {
+        registerSecret(value);
+        learned += 1;
+      }
+    }
+  }
+
+  return learned;
 }

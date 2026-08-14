@@ -61,7 +61,23 @@ const MIGRATIONS: Array<{ id: number; sql: string }> = [
       );
     `,
   },
+  {
+    id: 2,
+    sql: `
+      CREATE TABLE IF NOT EXISTS outbox (
+        id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id  INTEGER NOT NULL,
+        body     TEXT    NOT NULL,
+        ts       INTEGER NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_outbox_ts ON outbox(ts);
+    `,
+  },
 ];
+
+export class DatabaseCorruptError extends Error {}
 
 /** Open (creating if needed) the agent database and run pending migrations. */
 export function openDatabase(file: string): Db {
@@ -70,9 +86,25 @@ export function openDatabase(file: string): Db {
   }
   const db = new DatabaseSync(file);
 
+  // SQLite opens lazily, so a corrupt file would otherwise appear to open fine
+  // and then fail on the first real query — mid-task, unattended.
+  try {
+    db.exec('SELECT count(*) FROM sqlite_master;');
+  } catch (err) {
+    try {
+      db.close();
+    } catch {
+      // nothing more to do
+    }
+    throw new DatabaseCorruptError(`Database at ${file} is not readable: ${(err as Error).message}`);
+  }
+
   db.exec('PRAGMA journal_mode = WAL;');
   db.exec('PRAGMA foreign_keys = ON;');
   db.exec('PRAGMA busy_timeout = 5000;');
+  // Power-safe rather than merely crash-safe: this database is tiny and the
+  // whole point is surviving an unexpected shutdown.
+  db.exec('PRAGMA synchronous = FULL;');
   db.exec('CREATE TABLE IF NOT EXISTS schema_migrations (id INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);');
 
   const applied = new Set(
@@ -86,4 +118,29 @@ export function openDatabase(file: string): Db {
   }
 
   return db;
+}
+
+/**
+ * Open the database, quarantining it if it is unreadable.
+ *
+ * For an unattended service, refusing to start forever is worse than losing
+ * task history: the operator would just see a bot that never comes back.
+ */
+export function openDatabaseResilient(file: string): { db: Db; quarantined: string | null } {
+  try {
+    return { db: openDatabase(file), quarantined: null };
+  } catch (err) {
+    if (!(err instanceof DatabaseCorruptError) || file === ':memory:') throw err;
+
+    const aside = `${file}.corrupt-${Date.now()}`;
+    fs.renameSync(file, aside);
+    for (const suffix of ['-wal', '-shm']) {
+      try {
+        fs.rmSync(`${file}${suffix}`, { force: true });
+      } catch {
+        // best effort
+      }
+    }
+    return { db: openDatabase(file), quarantined: aside };
+  }
 }

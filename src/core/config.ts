@@ -27,6 +27,8 @@ export interface AppConfig {
     agent: string | null;
     autopilot: boolean;
     maxAutopilotContinues: number;
+    /** Run shell commands inside the CLI's experimental MXC sandbox. */
+    sandbox: boolean;
   };
   limits: {
     maxAiCreditsPerTask: number;
@@ -43,15 +45,31 @@ export interface AppConfig {
     checkpoint: boolean;
     requireApprovalWhenDirty: boolean;
     protectedBranches: string[];
+    /** Permit an auto-commit when the project declares no test/build command. */
+    allowCommitWithoutVerification: boolean;
   };
   safety: {
     requireApprovalForDangerousActions: boolean;
     extraDeniedCommands: string[];
     allowedUrls: string[];
+    /** Extra environment variables to forward to the Copilot child process. */
+    envPassthrough: string[];
+    /** Let the target repository's AGENTS.md etc. act as agent instructions. */
+    allowRepoInstructions: boolean;
+    /** Keep the built-in GitHub MCP server enabled. */
+    githubMcp: boolean;
   };
   verify: {
     runTests: boolean;
     runBuild: boolean;
+  };
+  orchestration: {
+    /** Allow explorer/reviewer passes at all. Off = one implementer session. */
+    enabled: boolean;
+    /** Hard ceiling on paid Copilot sessions per task, retries included. */
+    maxAgentCalls: number;
+    /** Below this confidence a review pass is worth its credits. */
+    reviewThreshold: number;
   };
   storage: {
     workspace: string;
@@ -117,7 +135,7 @@ export function loadEnvFile(root: string = PROJECT_ROOT): void {
   }
 }
 
-const EFFORT_LEVELS = ['none', 'low', 'medium', 'high', 'xhigh', 'max'];
+const EFFORT_LEVELS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 
 export interface LoadOptions {
   /** Skip validation of Telegram credentials (used by `doctor` and offline CLI commands). */
@@ -177,12 +195,13 @@ export function loadConfig(options: LoadOptions = {}): AppConfig {
     },
     copilot: {
       bin: env('COPILOT_BIN') ?? null,
-      model: env('COPILOT_MODEL') ?? 'claude-opus-4.8',
-      modelFallback: env('COPILOT_MODEL_FALLBACK') ?? null,
+      model: env('COPILOT_MODEL') ?? 'claude-opus-5',
+      modelFallback: env('COPILOT_MODEL_FALLBACK') ?? 'claude-opus-4.8',
       effort,
       agent: requestedAgent === 'none' ? null : requestedAgent,
       autopilot: bool('COPILOT_AUTOPILOT', true),
       maxAutopilotContinues: int('MAX_AUTOPILOT_CONTINUES', 5, { min: 1, max: 50 }),
+      sandbox: bool('COPILOT_SANDBOX', false),
     },
     limits: {
       maxAiCreditsPerTask: num('MAX_AI_CREDITS_PER_TASK', 10),
@@ -199,21 +218,30 @@ export function loadConfig(options: LoadOptions = {}): AppConfig {
       checkpoint: bool('GIT_CHECKPOINT', true),
       requireApprovalWhenDirty: bool('REQUIRE_APPROVAL_WHEN_DIRTY', true),
       protectedBranches: list('PROTECTED_BRANCHES', ['main', 'master', 'production', 'release']),
+      allowCommitWithoutVerification: bool('ALLOW_COMMIT_WITHOUT_VERIFICATION', false),
     },
     safety: {
       requireApprovalForDangerousActions: bool('REQUIRE_APPROVAL_FOR_DANGEROUS_ACTIONS', true),
       extraDeniedCommands: list('EXTRA_DENIED_COMMANDS'),
+      envPassthrough: list('COPILOT_ENV_PASSTHROUGH'),
+      allowRepoInstructions: bool('COPILOT_REPO_INSTRUCTIONS', false),
+      githubMcp: bool('COPILOT_GITHUB_MCP', false),
       allowedUrls: list('ALLOWED_URLS', [
-        'github.com',
-        '*.github.com',
         'registry.npmjs.org',
         'pypi.org',
         'files.pythonhosted.org',
+        'objects.githubusercontent.com',
+        'github.com',
       ]),
     },
     verify: {
       runTests: bool('RUN_TESTS', true),
       runBuild: bool('RUN_BUILD', true),
+    },
+    orchestration: {
+      enabled: bool('ORCHESTRATION', true),
+      maxAgentCalls: int('MAX_AGENT_CALLS_PER_TASK', 4, { min: 1, max: 10 }),
+      reviewThreshold: num('REVIEW_CONFIDENCE_THRESHOLD', 0.75),
     },
     storage: {
       workspace,

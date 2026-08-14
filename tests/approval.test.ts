@@ -68,6 +68,41 @@ describe('approval workflow', () => {
     details: [],
   });
 
+  test('an undeliverable approval card fails fast instead of blocking for the timeout', async () => {
+    // The bot used to swallow send failures, so the task held the only queue
+    // slot for the full APPROVAL_TIMEOUT_MINUTES waiting for a tap on a card
+    // that was never delivered.
+    const { db, tasks } = harness();
+    const notifier: Notifier = {
+      async sendMessage() {},
+      async requestApproval() {
+        throw new Error('Telegram unreachable');
+      },
+    };
+    const task = tasks.create({
+      userId: 1,
+      chatId: 1,
+      projectId: 'demo',
+      prompt: 'deploy',
+      approvalRequired: true,
+      approvalReason: 'deployment',
+    });
+    // A long timeout: the point is that we do NOT wait for it.
+    const service = new ApprovalService(tasks, notifier, 10 * 60_000);
+
+    const started = Date.now();
+    const outcome = await service.request(request(task.id));
+
+    assert.equal(outcome, 'REJECTED');
+    assert.ok(Date.now() - started < 2_000, 'must not wait for the approval timeout');
+    assert.equal(service.isPending(task.id), false, 'the waiter must not be left behind');
+    assert.ok(
+      tasks.events(task.id).some((e) => /Could not deliver approval request/.test(e.message)),
+      'the operator must be able to see why it was rejected',
+    );
+    db.close();
+  });
+
   test('blocks until the operator approves', async () => {
     const { db, tasks, sent, notifier } = harness();
     const task = tasks.create({
@@ -90,7 +125,6 @@ describe('approval workflow', () => {
     assert.equal(tasks.get(task.id)!.approvalStatus, 'APPROVED');
     db.close();
   });
-
   test('propagates a rejection', async () => {
     const { db, tasks, notifier } = harness();
     const task = tasks.create({
@@ -140,7 +174,60 @@ describe('approval workflow', () => {
       approvalReason: null,
     });
     const service = new ApprovalService(tasks, notifier, 1_000);
-    assert.equal(service.resolve(1, 'APPROVED'), false);
+    assert.equal(service.resolve(1, 'APPROVED'), 'not-pending');
+    db.close();
+  });
+
+  test('never writes an event for an unknown task id', () => {
+    const { db, tasks, notifier } = harness();
+    const service = new ApprovalService(tasks, notifier, 1_000);
+    // A foreign-key violation here would throw inside the Telegram handler and
+    // leave the operator staring at a spinner.
+    assert.doesNotThrow(() => service.resolve(999_999, 'APPROVED'));
+    assert.equal(service.resolve(999_999, 'APPROVED'), 'not-pending');
+    db.close();
+  });
+
+  test('refuses a decision from a different operator', async () => {
+    const { db, tasks, notifier } = harness();
+    const task = tasks.create({
+      userId: 111,
+      chatId: 1,
+      projectId: 'demo',
+      prompt: 'x',
+      approvalRequired: true,
+      approvalReason: 'r',
+    });
+    const service = new ApprovalService(tasks, notifier, 5_000);
+    const pending = service.request(request(task.id));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(service.resolve(task.id, 'APPROVED', 222), 'forbidden');
+    assert.equal(service.isPending(task.id), true, 'still waiting after a foreign decision');
+    assert.equal(service.resolve(task.id, 'APPROVED', 111), 'resolved');
+    assert.equal(await pending, 'APPROVED');
+    db.close();
+  });
+
+  test('an abort signal abandons the wait so cancellation is not a lie', async () => {
+    const { db, tasks, notifier } = harness();
+    const task = tasks.create({
+      userId: 1,
+      chatId: 1,
+      projectId: 'demo',
+      prompt: 'x',
+      approvalRequired: true,
+      approvalReason: 'r',
+    });
+    const service = new ApprovalService(tasks, notifier, 60_000);
+    const controller = new AbortController();
+
+    const pending = service.request(request(task.id), { signal: controller.signal });
+    await new Promise((resolve) => setImmediate(resolve));
+    controller.abort();
+
+    assert.equal(await pending, 'REJECTED');
+    assert.equal(service.isPending(task.id), false);
     db.close();
   });
 });

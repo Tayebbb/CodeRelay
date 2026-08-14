@@ -21,6 +21,12 @@ export class ProjectRegistryError extends Error {}
 
 const SLUG_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
+/**
+ * Characters that would change the meaning of an operator-configured test/build
+ * command once it reaches a shell. Rejected at registration time.
+ */
+const COMMAND_METACHARACTERS = /[&|;<>^`$\r\n%"]/;
+
 function slugify(value: string): string {
   return value
     .toLowerCase()
@@ -58,8 +64,47 @@ export function isInside(parent: string, child: string): boolean {
   return !rel.startsWith('..') && !path.isAbsolute(rel);
 }
 
+/**
+ * Canonical, symlink-free form of a path. Directory junctions and symlinks would
+ * otherwise let a path inside the project resolve to somewhere else entirely
+ * (e.g. `<project>/vendor` -> `C:\Users\me\.ssh`), defeating every containment
+ * check that works on strings alone.
+ */
+export function realPath(target: string): string {
+  try {
+    return fs.realpathSync.native(path.resolve(target));
+  } catch {
+    // Not yet created: canonicalise the nearest existing ancestor instead.
+    const resolved = path.resolve(target);
+    const parent = path.dirname(resolved);
+    if (parent === resolved) return resolved;
+    return path.join(realPath(parent), path.basename(resolved));
+  }
+}
+
+/** True when `child` really is inside `parent`, following links on both sides. */
+export function isReallyInside(parent: string, child: string): boolean {
+  return isInside(realPath(parent), realPath(child));
+}
+
+/** Path spellings that bypass normalisation and must never be accepted. */
+const SUSPICIOUS_PATH = [
+  /^\\\\\?\\/, // \\?\C:\... extended-length form
+  /^\\\\/, // UNC \\server\share
+  /~\d(\\|\/|$)/, // 8.3 short names such as PROGRA~1
+  /[\r\n\0]/,
+];
+
 function assertSafeProjectPath(projectPath: string): string {
-  const resolved = path.resolve(projectPath);
+  for (const pattern of SUSPICIOUS_PATH) {
+    if (pattern.test(projectPath)) {
+      throw new ProjectRegistryError(`Refusing a non-canonical or network path: ${projectPath}`);
+    }
+  }
+
+  // Compare the REAL path: a junction could otherwise point a innocuous-looking
+  // directory straight at ~/.ssh.
+  const resolved = realPath(projectPath);
 
   if (!path.isAbsolute(resolved)) {
     throw new ProjectRegistryError(`Project path must be absolute: ${projectPath}`);
@@ -69,7 +114,7 @@ function assertSafeProjectPath(projectPath: string): string {
   if (parsed.root === resolved) {
     throw new ProjectRegistryError(`Refusing to register a filesystem root: ${resolved}`);
   }
-  if (resolved === path.resolve(os.homedir())) {
+  if (resolved === realPath(os.homedir())) {
     throw new ProjectRegistryError('Refusing to register your entire home directory as a project.');
   }
   for (const forbidden of forbiddenRoots()) {
@@ -82,6 +127,7 @@ function assertSafeProjectPath(projectPath: string): string {
 
 export class ProjectRegistry {
   private projects = new Map<string, ProjectRecord>();
+  private lastError: string | null = null;
 
   constructor(private readonly file: string) {}
 
@@ -96,6 +142,16 @@ export class ProjectRegistry {
     if (!SLUG_RE.test(id)) {
       throw new ProjectRegistryError(`Invalid project id "${record.id}". Use letters, digits, dot, dash, underscore.`);
     }
+    for (const [field, value] of [
+      ['testCommand', record.testCommand],
+      ['buildCommand', record.buildCommand],
+    ] as const) {
+      if (value && COMMAND_METACHARACTERS.test(value)) {
+        throw new ProjectRegistryError(
+          `${field} for "${id}" contains shell metacharacters. Use a single command with plain arguments.`,
+        );
+      }
+    }
     return {
       ...record,
       id,
@@ -106,9 +162,42 @@ export class ProjectRegistry {
     };
   }
 
+  /**
+   * Reload from disk. A corrupted file keeps the last good set in memory rather
+   * than leaving the agent with no projects at all, and reports the problem.
+   */
   load(): void {
-    this.projects.clear();
-    if (this.file === ':memory:' || !fs.existsSync(this.file)) return;
+    if (this.file === ':memory:') return;
+
+    let records: ProjectRecord[];
+    try {
+      records = this.readRecords();
+    } catch (err) {
+      this.lastError = err instanceof Error ? err.message : String(err);
+      if (this.projects.size > 0) return;
+      throw err;
+    }
+
+    const next = new Map<string, ProjectRecord>();
+    for (const record of records) {
+      const normalized = this.normalize(record);
+      if (next.has(normalized.id)) {
+        throw new ProjectRegistryError(`Duplicate project id "${normalized.id}" in ${this.file}`);
+      }
+      next.set(normalized.id, normalized);
+    }
+
+    this.projects = next;
+    this.lastError = null;
+  }
+
+  /** Why the last reload failed, if it did. */
+  loadError(): string | null {
+    return this.lastError;
+  }
+
+  private readRecords(): ProjectRecord[] {
+    if (!fs.existsSync(this.file)) return [];
 
     let parsed: unknown;
     try {
@@ -117,17 +206,9 @@ export class ProjectRegistry {
       throw new ProjectRegistryError(`Could not parse ${this.file}: ${(err as Error).message}`);
     }
 
-    const records = Array.isArray(parsed)
+    return Array.isArray(parsed)
       ? (parsed as ProjectRecord[])
       : ((parsed as { projects?: ProjectRecord[] }).projects ?? []);
-
-    for (const record of records) {
-      const normalized = this.normalize(record);
-      if (this.projects.has(normalized.id)) {
-        throw new ProjectRegistryError(`Duplicate project id "${normalized.id}" in ${this.file}`);
-      }
-      this.projects.set(normalized.id, normalized);
-    }
   }
 
   save(): void {
@@ -197,9 +278,9 @@ export class ProjectRegistry {
   assertWithinProject(projectId: string, candidate: string): string {
     const project = this.getById(projectId);
     if (!project) throw new ProjectRegistryError(`Unknown project "${projectId}"`);
-    const resolved = path.resolve(candidate);
+    const resolved = realPath(candidate);
     const allowed = [project.path, ...(project.extraDirs ?? [])];
-    if (!allowed.some((root) => isInside(root, resolved))) {
+    if (!allowed.some((root) => isReallyInside(root, resolved))) {
       throw new ProjectRegistryError(`Path "${resolved}" is outside project "${project.name}"`);
     }
     return resolved;
