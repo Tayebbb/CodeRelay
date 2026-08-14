@@ -2,38 +2,70 @@
 
 Your personal remote coding agent. Send a coding task from your phone — your home PC does the work with GitHub Copilot, runs your tests, and reports back.
 
-```
-Phone ─┬─ Telegram ──┐
-       │             ├──►  your PC (one core)  ──►  Copilot CLI  ──►  your local repo
-       └─ Browser ───┘             │
-         ▲                          │
-         └── result, diff, tests ◄─┘
+> **You**, from anywhere: *"myapp: fix the failing date parser tests"*
+>
+> **Your PC at home:** snapshots the repo → runs the coding agent → runs
+> *your* tests → commits when they pass
+>
+> **You**, two minutes later: ✅ *Task completed · 2 files changed · 48 tests
+> passed · commit `8f31a92`* — with the full diff, on your phone.
+
+- **Free to run.** Uses the Copilot subscription you already have — no server, no hosting, no monthly bill.
+- **Two ways in.** Telegram bot, an installable web app, or both — same tasks, same history, either one is optional.
+- **Built paranoid.** Your uncommitted work is snapshotted before every task, nothing is pushed without your approval, and secrets never leave the machine.
+
+## Get started in five minutes
+
+On the PC that has your code (needs [Node 22.5+](https://nodejs.org), git, and a GitHub Copilot subscription):
+
+```powershell
+git clone https://github.com/Tayebbb/Mobile-agent-controller.git
+cd Mobile-agent-controller
+npm install
+npm run build
+
+npm install -g @github/copilot
+copilot login                        # sign in with your GitHub account
+
+npm run agent -- web setup           # choose a password for the web app
+Add-Content .env "WEB_ENABLED=true"
+
+npm run agent -- projects add MyApp "C:\code\myapp" --test "npm test"
+npm start
 ```
 
-**Two interfaces, one agent.** Use **Telegram**, the **web UI**, or **both** — they are optional clients of the same core and share the same tasks, approvals, budgets and history. Neither requires the other.
+Open **http://127.0.0.1:8787**, sign in, type a task, watch it happen.
+On your phone, use **Add to Home Screen** and it installs like an app.
 
-**No server. No hosting. No monthly bill.** It uses the Copilot subscription you already have, connects outward only (no open ports), and keeps everything in a local SQLite file.
+Prefer chatting with a **Telegram bot** instead (great for notifications on
+the go)? Follow **[docs/setup-telegram.md](docs/setup-telegram.md)** — five
+minutes too. You can enable both; they share everything.
+
+That's the whole product. Everything below is detail: the safety model
+(**worth reading before you point this at anything important**), every
+configuration option, and the architecture for those who want to read the
+blueprints.
 
 ---
 
-## Contents
+## The details
+
+_Reference for setup choices, day-to-day use, and — further down — the
+technical internals for those who want them._
 
 - [What it actually does](#what-it-actually-does)
 - [Is this safe? Read this first](#is-this-safe-read-this-first)
 - [Requirements](#requirements)
-- [Install](#install)
-- [Choose your interface](#choose-your-interface)
+- [Install, step by step](#install-step-by-step)
 - [Add your projects](#add-your-projects)
 - [Run it](#run-it)
 - [Using it from your phone](#using-it-from-your-phone)
 - [The web interface](#the-web-interface)
 - [Safety features](#safety-features)
-- [How it works (technical)](#how-it-works-technical)
 - [Configuration](#configuration)
 - [Troubleshooting](#troubleshooting)
 - [Cost](#cost)
-- [Known limitations](#known-limitations)
-- [Development](#development)
+- **For the curious:** [How it works (technical)](#how-it-works-technical) · [Known limitations](#known-limitations) · [Development](#development) · [full architecture tour](project-analysis.md)
 
 ---
 
@@ -90,7 +122,10 @@ Start with a throwaway repo. Watch a few tasks. Then decide how far to trust it.
 
 ---
 
-## Install
+## Install, step by step
+
+_The [quick start](#get-started-in-five-minutes) above compresses these steps;
+read on when you want to understand each one or set up Telegram._
 
 ### 1. Get the code
 
@@ -343,48 +378,6 @@ git checkout refs/remote-agent/checkpoint-4 -- .   # restore everything
 
 ---
 
-## How it works (technical)
-
-One core, thin clients, and a pluggable agent layer:
-
-```
- Telegram bot ─┐                        ┌─ provider: Copilot CLI ─┐
-              ├─► TaskService ─► Queue ─► TaskRunner ─► agent CLI  ├─► your repo
- Web UI (PWA) ─┘        │        │        │          └─ provider: Claude Code ┘
-      ▲                 ▼        ▼        ▼
-      └── EventBus ◄─ TaskRepository (SQLite: tasks, events, usage ledger)
-```
-
-- **One source of truth.** Every task lives in a local SQLite database
-  (`node:sqlite`, no server). Both interfaces submit through the same
-  `TaskService` — the queue cap, risk gate, approval flow and retry rules exist
-  exactly once — and observe through the same `EventBus`.
-- **Persistent FIFO queue.** Tasks are claimed with an atomic compare-and-swap
-  (`UPDATE … WHERE status='QUEUED'`), oldest first, one task per project at a
-  time — enforced in SQL, not in memory. A crash re-queues in-flight work with
-  its spend preserved; three interruptions abandon it rather than re-billing
-  forever.
-- **Provider abstraction.** The agent CLI sits behind an `AgentProvider`
-  interface (argv building, event parsing, failure classification). Every
-  provider declares its capabilities and `selectProvider()` **refuses to run**
-  when a mandatory protection (shell deny-list, write denial, repo-instruction
-  isolation) cannot be expressed in that CLI's flags — no silent downgrades.
-- **Hostile-repository model.** Before any git command runs, the repo's config
-  is fingerprinted for filter/diff drivers and executable hooks; agent, skill,
-  hook and MCP files are scanned before *and re-checked after* every agent
-  session; git runs with an absolute program path, a hardened environment and
-  no repository-supplied hooks. Verification commands execute with an
-  allow-listed environment that never contains the bot token.
-- **Zero runtime dependencies except `grammy`.** The web server is `node:http`
-  with Server-Sent Events (no WebSocket library), the frontend is dependency-
-  free static files under a strict CSP, and the PWA icons are generated by a
-  committed script with a hand-rolled PNG encoder.
-
-For a full architectural tour — module map, data model, event flow, security
-boundaries, test strategy — see **[project-analysis.md](project-analysis.md)**.
-
----
-
 ## Configuration
 
 Everything lives in `.env`. Only the first two are required.
@@ -448,6 +441,50 @@ Per-task detail: `npm run agent -- logs <id>`.
 | AI                     | Billed against your existing Copilot plan |
 
 A simple bug fix costs roughly **1 AI credit**. Daily and per-task ceilings are enforced locally, and it never enables paid overage.
+
+---
+
+## How it works (technical)
+
+_From here down is for the curious — nothing below is needed to use CodeRelay._
+
+One core, thin clients, and a pluggable agent layer:
+
+```
+ Telegram bot ─┐                        ┌─ provider: Copilot CLI ─┐
+              ├─► TaskService ─► Queue ─► TaskRunner ─► agent CLI  ├─► your repo
+ Web UI (PWA) ─┘        │        │        │          └─ provider: Claude Code ┘
+      ▲                 ▼        ▼        ▼
+      └── EventBus ◄─ TaskRepository (SQLite: tasks, events, usage ledger)
+```
+
+- **One source of truth.** Every task lives in a local SQLite database
+  (`node:sqlite`, no server). Both interfaces submit through the same
+  `TaskService` — the queue cap, risk gate, approval flow and retry rules exist
+  exactly once — and observe through the same `EventBus`.
+- **Persistent FIFO queue.** Tasks are claimed with an atomic compare-and-swap
+  (`UPDATE … WHERE status='QUEUED'`), oldest first, one task per project at a
+  time — enforced in SQL, not in memory. A crash re-queues in-flight work with
+  its spend preserved; three interruptions abandon it rather than re-billing
+  forever.
+- **Provider abstraction.** The agent CLI sits behind an `AgentProvider`
+  interface (argv building, event parsing, failure classification). Every
+  provider declares its capabilities and `selectProvider()` **refuses to run**
+  when a mandatory protection (shell deny-list, write denial, repo-instruction
+  isolation) cannot be expressed in that CLI's flags — no silent downgrades.
+- **Hostile-repository model.** Before any git command runs, the repo's config
+  is fingerprinted for filter/diff drivers and executable hooks; agent, skill,
+  hook and MCP files are scanned before *and re-checked after* every agent
+  session; git runs with an absolute program path, a hardened environment and
+  no repository-supplied hooks. Verification commands execute with an
+  allow-listed environment that never contains the bot token.
+- **Zero runtime dependencies except `grammy`.** The web server is `node:http`
+  with Server-Sent Events (no WebSocket library), the frontend is dependency-
+  free static files under a strict CSP, and the PWA icons are generated by a
+  committed script with a hand-rolled PNG encoder.
+
+For a full architectural tour — module map, data model, event flow, security
+boundaries, test strategy — see **[project-analysis.md](project-analysis.md)**.
 
 ---
 
