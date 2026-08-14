@@ -29,7 +29,7 @@ import { selectModel } from '../copilot/detect.js';
 import type { ApprovalRequest, Notifier } from '../notify/notifier.js';
 import { Git } from '../git/git.js';
 import { LoginThrottle, passwordFileExists, SessionStore, verifyPassword } from './auth.js';
-import { PROVIDER_IDS, selectProvider } from '../providers/index.js';
+import { isProviderId, PROVIDER_IDS, selectProvider, type ProviderId, type ProviderInfo } from '../providers/index.js';
 
 const log = createLogger('web');
 
@@ -70,6 +70,8 @@ export interface WebServerDeps {
   approvals: ApprovalService;
   service: TaskService;
   copilot: CopilotInfo;
+  /** Startup detection results for every known provider, keyed by id. */
+  providers?: Partial<Record<ProviderId, ProviderInfo>>;
   bus: EventBus;
   startedAt: number;
 }
@@ -322,42 +324,54 @@ export class WebServer {
   }
 
   private async handleAgents(res: ServerResponse): Promise<void> {
-    const { config, copilot } = this.deps;
+    const { config } = this.deps;
     if (!this.providerCache) {
       const entries: Array<Record<string, unknown>> = [];
       for (const id of PROVIDER_IDS) {
         const provider = selectProvider(id);
-        if (id === config.provider && id === 'copilot') {
-          entries.push({
-            id,
-            name: provider.displayName,
-            billing: provider.billing,
-            active: true,
-            installed: copilot.installed,
-            authenticated: copilot.authenticatedUser !== null,
-            models: copilot.models,
-          });
-          continue;
+        let info = this.providerInfoFor(id);
+        if (!info) {
+          // No startup detection was injected (headless construction): probe once.
+          try {
+            info = await provider.detect(null);
+          } catch {
+            info = null;
+          }
         }
-        // Non-active providers are probed once for the availability display.
-        try {
-          const info = await provider.detect(null);
-          entries.push({
-            id,
-            name: provider.displayName,
-            billing: provider.billing,
-            active: id === config.provider,
-            installed: info.installed,
-            authenticated: info.authenticatedUser !== null,
-            models: info.models,
-          });
-        } catch {
-          entries.push({ id, name: provider.displayName, billing: provider.billing, active: false, installed: false, authenticated: false, models: [] });
-        }
+        entries.push({
+          id,
+          name: provider.displayName,
+          billing: provider.billing,
+          active: id === config.provider,
+          installed: info?.installed ?? false,
+          authenticated: (info?.authenticatedUser ?? null) !== null,
+          // Selectable per task: installed and signed in. The runner re-checks.
+          selectable: (info?.installed ?? false) && (info?.authenticatedUser ?? null) !== null,
+          models: info?.models ?? [],
+        });
       }
       this.providerCache = entries;
     }
     this.json(res, 200, { agents: this.providerCache, defaultModel: config.copilot.model });
+  }
+
+  /** Detection info for a provider, adapting the injected Copilot info when no map entry exists. */
+  private providerInfoFor(id: ProviderId): ProviderInfo | null {
+    const known = this.deps.providers?.[id];
+    if (known) return known;
+    if (id === 'copilot') {
+      const c = this.deps.copilot;
+      return {
+        id: 'copilot',
+        installed: c.installed,
+        version: c.version,
+        launcher: c.launcher,
+        models: c.models,
+        authenticatedUser: c.authenticatedUser,
+        error: c.error ?? null,
+      };
+    }
+    return null;
   }
 
   private taskJson(task: NonNullable<ReturnType<TaskRepository['get']>>): Record<string, unknown> {
@@ -377,6 +391,7 @@ export class WebServer {
       approvalReason: task.approvalReason,
       origin: task.origin,
       model: task.model,
+      provider: task.provider,
       aiCredits: task.usage.aiCredits,
       files: task.result?.filesChanged ?? [],
       linesAdded: task.result?.linesAdded ?? 0,
@@ -444,9 +459,21 @@ export class WebServer {
     const projectId = typeof body?.projectId === 'string' ? body.projectId : '';
     const rawPrompt = typeof body?.prompt === 'string' ? body.prompt : '';
     const model = typeof body?.model === 'string' && body.model !== '' ? body.model : null;
+    const requestedProvider = typeof body?.provider === 'string' && body.provider !== '' ? body.provider : null;
     const mode = typeof body?.mode === 'string' && body.mode in MODE_DIRECTIVES ? body.mode : 'code';
 
-    if (model && !this.deps.copilot.models.includes(model)) {
+    if (requestedProvider && !isProviderId(requestedProvider)) {
+      return this.json(res, 400, { error: `Unknown agent provider "${requestedProvider}".` });
+    }
+    const effectiveProvider: ProviderId = isProviderId(requestedProvider ?? '')
+      ? (requestedProvider as ProviderId)
+      : this.deps.config.provider;
+    const info = this.providerInfoFor(effectiveProvider);
+    if (requestedProvider && !info?.installed) {
+      return this.json(res, 400, { error: `${requestedProvider} is not installed on the PC.` });
+    }
+    // Validated against the CHOSEN provider's catalogue, not the default's.
+    if (model && !(info?.models ?? this.deps.copilot.models).includes(model)) {
       return this.json(res, 400, { error: `Model "${model}" is not offered by the installed CLI.` });
     }
 
@@ -457,6 +484,7 @@ export class WebServer {
       projectId,
       prompt: MODE_DIRECTIVES[mode] + rawPrompt,
       model,
+      provider: requestedProvider,
     });
     if (!result.ok) return this.json(res, 400, { error: result.error });
     this.json(res, 201, { task: this.taskJson(result.task), awaitingApproval: result.awaitingApproval });

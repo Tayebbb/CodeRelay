@@ -7,6 +7,7 @@ import { openDatabaseResilient } from './db/database.js';
 import { TaskRepository } from './db/taskRepository.js';
 import { ProjectRegistry } from './projects/registry.js';
 import { detectCopilot, selectModel } from './copilot/detect.js';
+import { PROVIDER_IDS, selectProvider, type ProviderId, type ProviderInfo } from './providers/index.js';
 import { AGENT_NAME, installAgent } from './copilot/agentInstall.js';
 import { ApprovalService } from './approval/service.js';
 import { TaskRunner } from './runner/taskRunner.js';
@@ -101,14 +102,51 @@ export async function main(): Promise<number> {
   };
 
   const copilot = await detectCopilot(config.copilot.bin);
-  if (!copilot.installed || !copilot.launcher) {
-    return await abort(3, `Copilot CLI unavailable: ${copilot.error}\nInstall it with:  npm install -g @github/copilot`);
-  }
-  if (!copilot.authenticatedUser) {
-    return await abort(4, 'Copilot CLI is installed but no account is signed in.\nRun on the PC:  copilot login');
+
+  // Every known provider is probed once so tasks can choose among the installed
+  // ones. Only the DEFAULT provider is required to be usable at startup.
+  const providers: Partial<Record<ProviderId, ProviderInfo>> = {
+    copilot: {
+      id: 'copilot',
+      installed: copilot.installed,
+      version: copilot.version,
+      launcher: copilot.launcher,
+      models: copilot.models,
+      authenticatedUser: copilot.authenticatedUser,
+      error: copilot.error ?? null,
+    },
+  };
+  for (const id of PROVIDER_IDS) {
+    if (id === 'copilot') continue;
+    try {
+      providers[id] = await selectProvider(id).detect(null);
+    } catch (err) {
+      log.warn(`Could not probe provider "${id}"`, { error: errorMessage(err) });
+    }
   }
 
-  const selection = selectModel(config.copilot.model, config.copilot.modelFallback, copilot.models);
+  if (config.provider === 'copilot') {
+    if (!copilot.installed || !copilot.launcher) {
+      return await abort(3, `Copilot CLI unavailable: ${copilot.error}\nInstall it with:  npm install -g @github/copilot`);
+    }
+    if (!copilot.authenticatedUser) {
+      return await abort(4, 'Copilot CLI is installed but no account is signed in.\nRun on the PC:  copilot login');
+    }
+  } else {
+    const info = providers[config.provider];
+    if (!info?.installed || !info.launcher) {
+      return await abort(3, `The configured agent provider "${config.provider}" is not usable: ${info?.error ?? 'not installed'}`);
+    }
+  }
+
+  // The banner's model line reflects the DEFAULT provider's catalogue; another
+  // provider's default is its first listed model.
+  const activeInfo = providers[config.provider]!;
+  const bannerDefaultModel =
+    config.provider === 'copilot' || activeInfo.models.includes(config.copilot.model)
+      ? config.copilot.model
+      : activeInfo.models[0] ?? config.copilot.model;
+  const selection = selectModel(bannerDefaultModel, config.copilot.modelFallback, activeInfo.models);
   if (selection.note) log.warn(selection.note);
 
   // The CLI resolves custom agents relative to the working directory, which is
@@ -184,7 +222,7 @@ export async function main(): Promise<number> {
   };
 
   const approvals = new ApprovalService(tasks, notifier, config.limits.approvalTimeoutMs);
-  const runner = new TaskRunner({ config, tasks, projects, notifier, approvals, copilot, bus });
+  const runner = new TaskRunner({ config, tasks, projects, notifier, approvals, copilot, providers, bus });
   const queue = new TaskQueue(tasks, runner, { maxConcurrent: config.limits.maxConcurrentTasks });
   const service = new TaskService({ config, tasks, projects, queue, runner, approvals, notifier });
 
@@ -204,7 +242,7 @@ export async function main(): Promise<number> {
 
   let web: WebServer | null = null;
   if (config.interfaces.web) {
-    web = new WebServer({ config, tasks, projects, queue, approvals, service, copilot, bus, startedAt: Date.now() });
+    web = new WebServer({ config, tasks, projects, queue, approvals, service, copilot, providers, bus, startedAt: Date.now() });
   }
 
   // Approval requests reach every enabled interface; the task proceeds if at
@@ -295,7 +333,7 @@ export async function main(): Promise<number> {
   const banner = [
     '🟢 Home PC agent is online',
     '',
-    `Copilot CLI: v${copilot.version} (${copilot.authenticatedUser})`,
+    `Agent: ${config.provider === 'copilot' ? 'Copilot CLI' : config.provider} v${activeInfo.version ?? '?'} (${activeInfo.authenticatedUser ?? 'signed in'})`,
     `Model: ${selection.model}${selection.fellBack ? ` (fallback from ${selection.requested})` : ''}`,
     `Projects: ${projects.enabled().length}`,
     `Interfaces: ${[config.interfaces.telegram ? 'Telegram' : null, config.interfaces.web ? 'Web' : null].filter(Boolean).join(' + ')}`,

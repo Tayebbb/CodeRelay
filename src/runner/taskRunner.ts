@@ -24,7 +24,7 @@ import { publishChanges } from './publish.js';
 import { decideAfterCopilot, UNREPORTED_USAGE_FAILURE } from './stopReason.js';
 import { classifyTask, escalate, shouldReview } from '../orchestrator/plan.js';
 import { assessConfidence, parseReview, type ConfidenceResult } from '../orchestrator/confidence.js';
-import { selectProvider, type AgentProvider } from '../providers/index.js';
+import { isProviderId, selectProvider, type AgentProvider, type ProviderId, type ProviderInfo } from '../providers/index.js';
 import { formatReport } from '../telegram/format.js';
 
 const log = createLogger('runner');
@@ -39,6 +39,8 @@ export interface TaskRunnerDeps {
   notifier: Notifier;
   approvals: ApprovalService;
   copilot: CopilotInfo;
+  /** Detection results for every known provider, keyed by id. */
+  providers?: Partial<Record<ProviderId, ProviderInfo>>;
   bus?: EventBus;
 }
 
@@ -64,7 +66,7 @@ export class TaskRunner {
   }
 
   async run(task: Task): Promise<RunOutcome> {
-    const { config, tasks, projects, notifier, approvals, copilot } = this.deps;
+    const { config, tasks, projects, notifier, approvals } = this.deps;
     const controller = new AbortController();
     this.cancellations.set(task.id, controller);
 
@@ -135,25 +137,51 @@ export class TaskRunner {
         }
       }
 
-      // ---- Model selection ---------------------------------------------------------
-      // Checked here rather than asserted at each call site: without a launcher
-      // there is no way to start Copilot at all.
-      const launcher = copilot.launcher;
-      if (!launcher) {
+      // ---- Provider, launcher and model selection -----------------------------------
+      // Resolved per task: a task may carry its own provider choice, and a
+      // capability-deficient provider must fail here rather than silently run
+      // with weaker protections.
+      const providerId: ProviderId =
+        task.provider && isProviderId(task.provider) ? task.provider : config.provider;
+      let provider: AgentProvider;
+      try {
+        provider = selectProvider(providerId);
+      } catch (err) {
+        return await fail(errorMessage(err));
+      }
+      const providerInfo = this.providerInfo(providerId);
+      const launcher = providerInfo?.launcher ?? null;
+      // Never fall back to a different CLI: the operator chose where this task
+      // runs AND where it bills.
+      if (!providerInfo?.installed || !launcher || !launcher.safe) {
         return await fail(
-          'Copilot CLI is not usable on this machine (no safe way to launch it was found).\n' +
+          `${provider.displayName} is not usable on this machine (not installed, or no safe way to launch it was found).\n` +
             'Run `remote-agent doctor` for details.',
         );
+      }
+      if (task.provider && providerId !== config.provider) {
+        tasks.addEvent(task.id, 'provider', `Using ${provider.displayName} — billed to ${provider.billing}`);
       }
 
       // A per-task model override (chosen in an interface) outranks the
       // configured default, but only when the installed CLI actually offers it —
       // the fallback chain stays intact either way.
-      const requestedModel = task.model && copilot.models.includes(task.model) ? task.model : config.copilot.model;
+      // The configured default/fallback are written for the default provider's
+      // catalogue; another provider gets its own first-listed model instead.
+      const catalogue = providerInfo.models;
+      const defaultModel =
+        providerId === 'copilot' || catalogue.includes(config.copilot.model)
+          ? config.copilot.model
+          : catalogue[0] ?? config.copilot.model;
+      const fallbackModel =
+        providerId === 'copilot' || (config.copilot.modelFallback && catalogue.includes(config.copilot.modelFallback))
+          ? config.copilot.modelFallback
+          : catalogue.find((m) => m !== defaultModel) ?? null;
+      const requestedModel = task.model && catalogue.includes(task.model) ? task.model : defaultModel;
       if (task.model && requestedModel !== task.model) {
         tasks.addEvent(task.id, 'model', `Requested model "${task.model}" is not offered by this CLI; using default`);
       }
-      const selection = selectModel(requestedModel, config.copilot.modelFallback, copilot.models);
+      const selection = selectModel(requestedModel, fallbackModel, catalogue);
       // The catalogue is not an entitlement: a listed model can still be refused
       // at run time once its allowance is spent, so this can change mid-task.
       let activeModel = selection.model;
@@ -177,7 +205,7 @@ export class TaskRunner {
           '',
           `Project: ${project.name}`,
           `Model: ${selection.model}${selection.fellBack ? ` (fallback from ${selection.requested})` : ''}`,
-          `Engine: GitHub Copilot CLI ${copilot.version ?? ''}`.trim(),
+          `Engine: ${provider.displayName} ${providerInfo.version ?? ''}`.trim(),
           '',
           'Status: inspecting repository…',
         ].join('\n'),
@@ -211,11 +239,6 @@ export class TaskRunner {
       checkpointRef = prepared.repository.checkpointRef ?? undefined;
 
       // ---- Agent execution with bounded recovery -----------------------------------
-      // Resolved per task so a configuration change takes effect without a
-      // restart, and so a capability-deficient provider fails here rather than
-      // silently running with weaker protections.
-      const provider = selectProvider(config.provider);
-
       const deadline = startedAt + config.limits.maxTaskDurationMs;
       // APPROVAL_TIMEOUT_MINUTES defaults to 60 while MAX_TASK_DURATION_MINUTES
       // defaults to 30, so an unanswered card could hold the only queue slot
@@ -334,7 +357,7 @@ export class TaskRunner {
         }
 
         tasks.transition(task.id, 'RUNNING');
-        reporter.update(attempt === 0 ? '🔍 Copilot is inspecting the repository…' : `🔁 Recovery attempt ${attempt}…`);
+        reporter.update(attempt === 0 ? `🔍 ${provider.displayName} is inspecting the repository…` : `🔁 Recovery attempt ${attempt}…`);
 
         const prompt = buildTaskPrompt({
           userRequest: task.prompt,
@@ -410,8 +433,8 @@ export class TaskRunner {
         const action = decideAfterCopilot({
           result: copilotResult,
           activeModel,
-          availableModels: copilot.models,
-          configuredFallback: config.copilot.modelFallback,
+          availableModels: catalogue,
+          configuredFallback: fallbackModel,
           modelSwitchUsed: runtimeModelSwitchUsed,
           unreportedRuns: usage.unreportedRuns,
           tamper,
@@ -792,6 +815,25 @@ export class TaskRunner {
       durationMs: result.durationMs,
       summary: tailLines(combined, result.code === 0 ? 6 : 25).slice(0, 3000),
     };
+  }
+
+  /** Detection info for a provider, adapting the injected Copilot info when no map entry exists. */
+  private providerInfo(id: ProviderId): ProviderInfo | null {
+    const known = this.deps.providers?.[id];
+    if (known) return known;
+    if (id === 'copilot') {
+      const c = this.deps.copilot;
+      return {
+        id: 'copilot',
+        installed: c.installed,
+        version: c.version,
+        launcher: c.launcher,
+        models: c.models,
+        authenticatedUser: c.authenticatedUser,
+        error: c.error ?? null,
+      };
+    }
+    return null;
   }
 
   /**

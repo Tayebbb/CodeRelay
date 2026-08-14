@@ -1,17 +1,19 @@
 # CodeRelay
 
-Your personal remote coding agent. Send a coding task from your phone — your home PC does the work with GitHub Copilot, runs your tests, and reports back.
+Your personal remote coding agent. Send a coding task from your phone — your home PC does the work with your AI coding CLI (GitHub Copilot by default, Claude Code optional), runs your tests, and reports back.
 
-> **You**, from anywhere: *"myapp: fix the failing date parser tests"*
+> **You**, from anywhere: _"myapp: fix the failing date parser tests"_
 >
 > **Your PC at home:** snapshots the repo → runs the coding agent → runs
-> *your* tests → commits when they pass
+> _your_ tests → commits when they pass
 >
-> **You**, two minutes later: ✅ *Task completed · 2 files changed · 48 tests
-> passed · commit `8f31a92`* — with the full diff, on your phone.
+> **You**, two minutes later: ✅ _Task completed · 2 files changed · 48 tests
+> passed · commit `8f31a92`_ — with the full diff, on your phone.
 
-- **Free to run.** Uses the Copilot subscription you already have — no server, no hosting, no monthly bill.
+- **Free to run.** Uses the AI subscription you already have — GitHub Copilot by default, Claude Code as an alternative. Pick the agent CLI **and** model per task from the web app. No server, no hosting, no extra monthly bill.
 - **Two ways in.** Telegram bot, an installable web app, or both — same tasks, same history, either one is optional.
+- **No surprise AI spend.** CodeRelay does not automatically perform additional AI actions beyond your request — no task, no AI call. Reboots, restarts and idle time cost zero credits, and every task runs under hard daily and per-task budgets.
+- **Survives reboots.** `npm run agent -- startup install` once, and Windows starts it at logon and restarts it after a crash — no terminal, no VS Code window, no admin rights.
 - **Built paranoid.** Your uncommitted work is snapshotted before every task, nothing is pushed without your approval, and secrets never leave the machine.
 
 <p align="center">
@@ -22,7 +24,7 @@ Your personal remote coding agent. Send a coding task from your phone — your h
 
 ## Get started in five minutes
 
-On the PC that has your code (needs [Node 22.5+](https://nodejs.org), git, and a GitHub Copilot subscription):
+On the PC that has your code (needs [Node 22.5+](https://nodejs.org), git, and a GitHub Copilot subscription — or Claude Code, see [Configuration](#configuration)):
 
 ```powershell
 git clone https://github.com/Tayebbb/Mobile-agent-controller.git
@@ -87,7 +89,7 @@ Then, on your PC:
 
 1. **Takes a snapshot** of the repo so nothing you have in progress can be lost
 2. **Scans the repo** for anything that could hijack the agent
-3. **Runs GitHub Copilot CLI** on the task
+3. **Runs your agent CLI** — GitHub Copilot by default, or Claude Code if you picked it for this task
 4. **Runs your tests** (`npm test`, `pytest`, `go test` — whatever it detects)
 5. **Asks your permission** before anything risky: committing to `main`, pushing, or changing what your test command runs
 6. **Commits** and sends you a report with the files changed, test results and what it cost
@@ -103,6 +105,7 @@ Be honest with yourself about what this is: **an AI agent running unattended on 
 The design takes that seriously. Every property below is enforced in code and covered by tests:
 
 - **Only you can command it.** Authorisation is a numeric Telegram user-ID allow-list. Everyone else gets `This bot is private.` and nothing else. Direct messages only — it refuses to operate in group chats.
+- **It never acts on its own.** CodeRelay does not automatically perform additional AI actions beyond the user's request. No submitted task means no AI call — startup, reboot and crash recovery consume zero credits; the agent comes online and waits for you.
 - **Your work is never destroyed.** Before touching anything it writes a git checkpoint that includes your _uncommitted_ changes. There is always a way back.
 - **It stops rather than guessing.** Merge conflicts, broken git, a full disk, or a repo shipping its own Copilot config — it refuses to start and tells you why.
 - **Secrets never leave.** Your bot token and your projects' `.env` values are stripped from every message, log and stored record.
@@ -118,13 +121,13 @@ Start with a throwaway repo. Watch a few tasks. Then decide how far to trust it.
 
 ## Requirements
 
-|                                 |                                                                  |
-| ------------------------------- | ---------------------------------------------------------------- |
-| **Windows 10/11**               | macOS/Linux code paths exist; startup automation is Windows-only |
-| **Node.js 22.5+**               | Needs the built-in `node:sqlite`. Node 24 recommended            |
-| **Git**                         | Any recent version                                               |
-| **GitHub Copilot subscription** | The AI comes from here. There is no other API key                |
-| **Telegram account**            | Only for the Telegram interface — free, optional                  |
+|                               |                                                                                     |
+| ----------------------------- | ----------------------------------------------------------------------------------- |
+| **Windows 10/11**             | macOS/Linux code paths exist; startup automation is Windows-only                    |
+| **Node.js 22.5+**             | Needs the built-in `node:sqlite`. Node 24 recommended                               |
+| **Git**                       | Any recent version                                                                  |
+| **An agent CLI subscription** | GitHub Copilot (default) or Claude Code (`AGENT_PROVIDER=claude`). No other API key |
+| **Telegram account**          | Only for the Telegram interface — free, optional                                    |
 
 ---
 
@@ -149,6 +152,10 @@ npm install -g @github/copilot
 copilot login
 ```
 
+Prefer **Claude Code**? Install it, sign in, and set `AGENT_PROVIDER=claude`
+plus a Claude model in `COPILOT_MODEL` — `.env.example` walks through it.
+Note it bills your Anthropic plan, not a Copilot subscription.
+
 ### 3. Choose your interface
 
 You need at least one. You can enable both at any time — they share everything.
@@ -163,11 +170,11 @@ Interfaces:            best for:
   🔀 Both              Telegram for pings, the browser for real work
 ```
 
-| You want | Do this | Guide |
-| -------- | ------- | ----- |
+| You want          | Do this                                                | Guide                                                |
+| ----------------- | ------------------------------------------------------ | ---------------------------------------------------- |
 | **Telegram only** | Create a bot, put its token and your user id in `.env` | **[docs/setup-telegram.md](docs/setup-telegram.md)** |
-| **Web only** | `npm run agent -- web setup`, then `WEB_ENABLED=true` | **[docs/setup-web.md](docs/setup-web.md)** |
-| **Both** | Do both of the above — no extra wiring | both guides |
+| **Web only**      | `npm run agent -- web setup`, then `WEB_ENABLED=true`  | **[docs/setup-web.md](docs/setup-web.md)**           |
+| **Both**          | Do both of the above — no extra wiring                 | both guides                                          |
 
 You are never asked to configure an interface you don't use: without a bot
 token, Telegram simply stays off; without `WEB_ENABLED=true`, no web server
@@ -226,16 +233,21 @@ Runs in the foreground; `Ctrl+C` stops it.
 ### Permanently (recommended)
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\install-startup.ps1
-Start-ScheduledTask -TaskName RemotePersonalCodingAgent
+npm run agent -- startup install
+npm run agent -- startup status
+npm run agent -- startup remove     # keeps all data, projects and history
 ```
 
-Registers a per-user Scheduled Task — no admin rights, no Windows service. It starts at logon, restarts within a minute if it crashes, and keeps running after you close your terminal.
+`install` registers a per-user Windows Scheduled Task — no admin rights, no Windows service, and installing twice replaces rather than duplicates. It starts at logon, restarts within a minute if it crashes (bounded, not forever), and keeps running after you close your terminal. `remove` only removes the auto-start: CodeRelay, your projects, task history and configuration stay untouched.
+
+**Starting is free.** Booting the agent never starts an AI task and consumes zero AI credits — it restores its queue from disk and waits for you. Your subscription is only used when the existing task flow runs work you submitted, under all the usual budgets and approval gates.
+
+Prefer the raw scripts? `scripts\install-startup.ps1` and `scripts\uninstall-startup.ps1` are what the commands run.
 
 ```powershell
+Start-ScheduledTask -TaskName RemotePersonalCodingAgent   # start it right now
 Stop-ScheduledTask -TaskName RemotePersonalCodingAgent
 npm run agent -- status
-powershell -ExecutionPolicy Bypass -File scripts\uninstall-startup.ps1
 ```
 
 **Two things that will otherwise bite you.**
@@ -327,8 +339,9 @@ whole point is that you are away from the PC.
 └────────────────────────────────────────────────────────────┘
 ```
 
-- **Model picker** filled from the *installed* CLI's real catalogue — nothing
-  hardcoded, unavailable providers shown but not selectable.
+- **Agent + model picker** filled from the _installed_ CLIs' real catalogues —
+  nothing hardcoded. Any installed, signed-in provider (Copilot, Claude Code)
+  can be chosen per task; unavailable ones are shown but not selectable.
 - **Modes** — Code, Plan, Review, Debug, Ask — shape the task on the server,
   so both interfaces get identical orchestration.
 - **Live streaming** over Server-Sent Events: progress lines, approval cards
@@ -352,14 +365,14 @@ safely from outside your home (private tunnel or SSH; never an open port).
 
 ### Telegram or web?
 
-|  | Telegram | Web |
-| - | -------- | --- |
-| Quick command / status while out | **best** | fine |
-| Push notification when a task finishes | **yes** | no (open page only) |
-| Choosing the model per task | no | **yes** |
-| Reading diffs and code | painful | **good** |
-| Task history browsing | limited | **good** |
-| Long, multi-step work sessions | fine | **best** |
+|                                        | Telegram | Web                 |
+| -------------------------------------- | -------- | ------------------- |
+| Quick command / status while out       | **best** | fine                |
+| Push notification when a task finishes | **yes**  | no (open page only) |
+| Choosing the model per task            | no       | **yes**             |
+| Reading diffs and code                 | painful  | **good**            |
+| Task history browsing                  | limited  | **good**            |
+| Long, multi-step work sessions         | fine     | **best**            |
 
 Enable both: task ids, state, budgets, approvals and history are shared,
 because both talk to the same core. A task sent from Telegram appears in the
@@ -388,25 +401,26 @@ git checkout refs/remote-agent/checkpoint-4 -- .   # restore everything
 
 Everything lives in `.env`. Only the first two are required.
 
-| Setting                       | Default                          | Meaning                                      |
-| ----------------------------- | -------------------------------- | -------------------------------------------- |
-| `TELEGRAM_ENABLED`            | on if a token is set             | The Telegram interface                       |
-| `TELEGRAM_BOT_TOKEN`          | —                                | From @BotFather (Telegram only)              |
-| `AUTHORIZED_TELEGRAM_USER_ID` | —                                | Your numeric id; comma-separated for several |
-| `WEB_ENABLED`                 | `false`                          | The browser interface                        |
-| `WEB_HOST` / `WEB_PORT`       | `127.0.0.1` / `8787`             | Where the web UI listens                     |
-| `COPILOT_MODEL`               | `claude-opus-5`                  | List them with `npm run agent -- models`     |
-| `COPILOT_MODEL_FALLBACK`      | `claude-opus-4.8`                | Used if the first is refused at run time     |
-| `COPILOT_SANDBOX`             | `false`                          | `true` gives real containment (experimental) |
-| `MAX_AI_CREDITS_PER_TASK`     | `10`                             | Per-task ceiling                             |
-| `MAX_AI_CREDITS_PER_DAY`      | `50`                             | Daily ceiling                                |
-| `MAX_TASK_DURATION_MINUTES`   | `30`                             | Hard time limit                              |
-| `MAX_RETRIES`                 | `2`                              | Recovery attempts after failing tests        |
-| `AUTO_COMMIT`                 | `true`                           | Commit once tests pass                       |
-| `AUTO_PUSH`                   | `false`                          | Push (also always needs approval)            |
-| `PROTECTED_BRANCHES`          | `main,master,production,release` | Committing here needs approval               |
-| `ORCHESTRATION`               | `true`                           | Allow survey/review passes on complex work   |
-| `MAX_AGENT_CALLS_PER_TASK`    | `4`                              | Hard ceiling on paid sessions per task       |
+| Setting                       | Default                          | Meaning                                                                                  |
+| ----------------------------- | -------------------------------- | ---------------------------------------------------------------------------------------- |
+| `TELEGRAM_ENABLED`            | on if a token is set             | The Telegram interface                                                                   |
+| `TELEGRAM_BOT_TOKEN`          | —                                | From @BotFather (Telegram only)                                                          |
+| `AUTHORIZED_TELEGRAM_USER_ID` | —                                | Your numeric id; comma-separated for several                                             |
+| `WEB_ENABLED`                 | `false`                          | The browser interface                                                                    |
+| `WEB_HOST` / `WEB_PORT`       | `127.0.0.1` / `8787`             | Where the web UI listens                                                                 |
+| `AGENT_PROVIDER`              | `copilot`                        | Default agent CLI: `copilot` or `claude`. The web UI can pick any installed one per task |
+| `COPILOT_MODEL`               | `claude-opus-5`                  | List them with `npm run agent -- models`                                                 |
+| `COPILOT_MODEL_FALLBACK`      | `claude-opus-4.8`                | Used if the first is refused at run time                                                 |
+| `COPILOT_SANDBOX`             | `false`                          | `true` gives real containment (experimental)                                             |
+| `MAX_AI_CREDITS_PER_TASK`     | `10`                             | Per-task ceiling                                                                         |
+| `MAX_AI_CREDITS_PER_DAY`      | `50`                             | Daily ceiling                                                                            |
+| `MAX_TASK_DURATION_MINUTES`   | `30`                             | Hard time limit                                                                          |
+| `MAX_RETRIES`                 | `2`                              | Recovery attempts after failing tests                                                    |
+| `AUTO_COMMIT`                 | `true`                           | Commit once tests pass                                                                   |
+| `AUTO_PUSH`                   | `false`                          | Push (also always needs approval)                                                        |
+| `PROTECTED_BRANCHES`          | `main,master,production,release` | Committing here needs approval                                                           |
+| `ORCHESTRATION`               | `true`                           | Allow survey/review passes on complex work                                               |
+| `MAX_AGENT_CALLS_PER_TASK`    | `4`                              | Hard ceiling on paid sessions per task                                                   |
 
 `.env.example` documents every option.
 
@@ -419,9 +433,9 @@ Everything lives in `.env`. Only the first two are required.
 | Symptom                                     | Fix                                                                                                              |
 | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | Bot ignores you                             | Your id isn't in `AUTHORIZED_TELEGRAM_USER_ID` — check with @userinfobot                                         |
-| `No interface is enabled`                   | Enable Telegram (token + id) or the web UI (`WEB_ENABLED=true`), or both                                          |
-| `…has no password yet`                      | `npm run agent -- web setup`                                                                                      |
-| `401 Unauthorized` at startup               | Wrong token, or another copy of the bot is already polling                                                        |
+| `No interface is enabled`                   | Enable Telegram (token + id) or the web UI (`WEB_ENABLED=true`), or both                                         |
+| `…has no password yet`                      | `npm run agent -- web setup`                                                                                     |
+| `401 Unauthorized` at startup               | Wrong token, or another copy of the bot is already polling                                                       |
 | `no account is signed in`                   | Run `copilot login`                                                                                              |
 | `Model "X" is not available`                | Usually your Copilot allowance is temporarily spent. It switches model once automatically; otherwise retry later |
 | Task refused: merge conflicts               | Resolve them yourself first                                                                                      |
@@ -439,14 +453,14 @@ Per-task detail: `npm run agent -- logs <id>`.
 
 **This application adds no recurring cost.**
 
-|                        |                                           |
-| ---------------------- | ----------------------------------------- |
-| Telegram Bot API       | Free                                      |
-| SQLite (`node:sqlite`) | Built into Node                           |
-| Hosting                | None — it runs on your PC                 |
-| AI                     | Billed against your existing Copilot plan |
+|                        |                                                                                                   |
+| ---------------------- | ------------------------------------------------------------------------------------------------- |
+| Telegram Bot API       | Free                                                                                              |
+| SQLite (`node:sqlite`) | Built into Node                                                                                   |
+| Hosting                | None — it runs on your PC                                                                         |
+| AI                     | Billed against your existing plan — Copilot by default, or Anthropic when `AGENT_PROVIDER=claude` |
 
-A simple bug fix costs roughly **1 AI credit**. Daily and per-task ceilings are enforced locally, and it never enables paid overage.
+A simple bug fix costs roughly **1 AI credit**. Daily and per-task ceilings are enforced locally, and it never enables paid overage. And because no AI action ever happens without a task you sent, an idle agent — running all week, surviving reboots — costs exactly nothing.
 
 ---
 
@@ -456,12 +470,65 @@ _From here down is for the curious — nothing below is needed to use CodeRelay.
 
 One core, thin clients, and a pluggable agent layer:
 
+```mermaid
+flowchart LR
+    subgraph Interfaces["Interfaces (both optional)"]
+        TG["Telegram bot"]
+        WEB["Web UI (PWA)"]
+    end
+    subgraph Core["One core — SQLite, node:sqlite"]
+        TS["TaskService<br/>risk gate · approvals · budgets"]
+        Q["Persistent FIFO queue"]
+        TR["TaskRunner"]
+        DB[("TaskRepository<br/>tasks · events · usage ledger")]
+        EB["EventBus<br/>live updates"]
+    end
+    subgraph Providers["AgentProvider layer — capability-gated"]
+        COP["GitHub Copilot CLI<br/>(default)"]
+        CLA["Claude Code<br/>(per-task choice)"]
+    end
+    REPO[("Your repository<br/>checkpoint · edits · tests · commit")]
+
+    TG --> TS
+    WEB --> TS
+    TS --> Q --> TR
+    TR --> COP --> REPO
+    TR --> CLA --> REPO
+    TR --> DB --> EB
+    EB --> TG
+    EB --> WEB
 ```
- Telegram bot ─┐                        ┌─ provider: Copilot CLI ─┐
-              ├─► TaskService ─► Queue ─► TaskRunner ─► agent CLI  ├─► your repo
- Web UI (PWA) ─┘        │        │        │          └─ provider: Claude Code ┘
-      ▲                 ▼        ▼        ▼
-      └── EventBus ◄─ TaskRepository (SQLite: tasks, events, usage ledger)
+
+And the life of one task, end to end:
+
+```mermaid
+sequenceDiagram
+    actor You as You (phone)
+    participant UI as Telegram / Web
+    participant Core as TaskService + Queue
+    participant Runner as TaskRunner
+    participant Agent as Agent CLI (Copilot / Claude)
+    participant Repo as Your repo
+
+    You->>UI: "myapp: fix the failing tests"
+    UI->>Core: submit (risk gate, queue cap, budgets)
+    opt dangerous prompt
+        Core-->>You: approval card
+        You-->>Core: approve / reject
+    end
+    Core->>Runner: claim task (FIFO, one per project)
+    Runner->>Repo: checkpoint — snapshots even uncommitted work
+    Runner->>Repo: hostile-config scan (hooks, drivers, agent files)
+    Runner->>Agent: run with deny-lists + credit budget
+    Agent->>Repo: inspect and edit files
+    Runner->>Repo: run YOUR test command
+    alt tests fail
+        Runner->>Agent: bounded retry with failure context
+    else tests pass
+        Runner->>Repo: commit (approval needed on protected branches)
+    end
+    Runner-->>UI: report — diff, test results, credits spent
+    UI-->>You: ✅ Task completed · commit hash
 ```
 
 - **One source of truth.** Every task lives in a local SQLite database
@@ -478,9 +545,12 @@ One core, thin clients, and a pluggable agent layer:
   provider declares its capabilities and `selectProvider()` **refuses to run**
   when a mandatory protection (shell deny-list, write denial, repo-instruction
   isolation) cannot be expressed in that CLI's flags — no silent downgrades.
+  This is also why only Copilot and Claude Code ship as providers: a CLI that
+  cannot express those protections (or has no headless agent mode at all, like
+  Antigravity's editor-launcher CLI) is refused rather than run weakened.
 - **Hostile-repository model.** Before any git command runs, the repo's config
   is fingerprinted for filter/diff drivers and executable hooks; agent, skill,
-  hook and MCP files are scanned before *and re-checked after* every agent
+  hook and MCP files are scanned before _and re-checked after_ every agent
   session; git runs with an absolute program path, a hardened environment and
   no repository-supplied hooks. Verification commands execute with an
   allow-listed environment that never contains the bot token.

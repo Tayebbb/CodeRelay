@@ -203,20 +203,21 @@ async function loadAgents() {
     const group = document.createElement('optgroup');
     const marker = !agent.installed ? ' — not installed' : !agent.authenticated ? ' — sign-in needed' : '';
     group.label = `${agent.name}${marker}`;
-    if (agent.active && agent.installed) {
+    if (agent.selectable && agent.models.length > 0) {
       for (const model of agent.models) {
         const option = document.createElement('option');
-        option.value = model;
+        // Provider travels with the model choice; the server re-validates both.
+        option.value = `${agent.id}::${model}`;
+        option.dataset.provider = agent.id;
+        option.dataset.model = model;
         option.textContent = model;
-        if (model === defaultModel) option.selected = true;
+        if (agent.active && model === defaultModel) option.selected = true;
         group.append(option);
       }
     } else {
-      // Visible but not selectable: switching the active agent is a server-side
-      // configuration decision (AGENT_PROVIDER), not a per-request one.
       const option = document.createElement('option');
       option.disabled = true;
-      option.textContent = agent.installed ? `via AGENT_PROVIDER=${agent.id}` : 'not available on the PC';
+      option.textContent = agent.installed ? 'sign in on the PC to use this' : 'not available on the PC';
       group.append(option);
     }
     select.append(group);
@@ -397,7 +398,7 @@ function renderChat(stream, task, events) {
   // Persisted history: CodeRelay telemetry. Chat shows the events an operator
   // acts on; raw internals (status arrows, attempt counters, confidence) stay
   // in the Timeline tab.
-  const CHAT_KINDS = new Set(['git', 'plan', 'approval', 'retry', 'recovery', 'security', 'verify', 'explore', 'queue', 'model']);
+  const CHAT_KINDS = new Set(['git', 'plan', 'approval', 'retry', 'recovery', 'security', 'verify', 'explore', 'queue', 'model', 'provider']);
   for (const event of events) {
     if (!CHAT_KINDS.has(event.kind)) continue;
     stream.append(sysLine(`${event.message}`, event.ts));
@@ -880,10 +881,12 @@ async function sendTask() {
   const button = $('send-button');
   button.disabled = true;
   try {
+    const selected = $('model-select').selectedOptions[0] ?? null;
     const body = {
       projectId: $('project-select').value,
       prompt,
-      model: $('model-select').value || null,
+      model: selected?.dataset.model || null,
+      provider: selected?.dataset.provider || null,
       mode: state.mode,
     };
     const { task, awaitingApproval } = await api('/api/tasks', { method: 'POST', body: JSON.stringify(body) });

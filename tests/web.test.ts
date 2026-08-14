@@ -357,6 +357,44 @@ describe('web interface', () => {
     assert.equal(response.status, 400);
   });
 
+  test('an unknown provider is refused before it reaches the core', async () => {
+    const response = await fetch(`${h.base}/api/tasks`, {
+      method: 'POST',
+      headers: authed(cookie),
+      body: JSON.stringify({ projectId: 'demo', prompt: 'x', provider: 'antigravity' }),
+    });
+    assert.equal(response.status, 400);
+  });
+
+  test('a known but uninstalled provider is refused', async () => {
+    // The harness injects no claude detection, so it is not installed.
+    const response = await fetch(`${h.base}/api/tasks`, {
+      method: 'POST',
+      headers: authed(cookie),
+      body: JSON.stringify({ projectId: 'demo', prompt: 'x', provider: 'claude' }),
+    });
+    assert.equal(response.status, 400);
+  });
+
+  test('a per-task provider choice is validated against ITS catalogue and persisted', async () => {
+    const bad = await fetch(`${h.base}/api/tasks`, {
+      method: 'POST',
+      headers: authed(cookie),
+      body: JSON.stringify({ projectId: 'demo', prompt: 'x', provider: 'copilot', model: 'opus' }),
+    });
+    assert.equal(bad.status, 400, 'a model from another provider must not pass validation');
+
+    const response = await fetch(`${h.base}/api/tasks`, {
+      method: 'POST',
+      headers: authed(cookie),
+      body: JSON.stringify({ projectId: 'demo', prompt: 'use the chosen CLI', provider: 'copilot', model: 'gpt-5' }),
+    });
+    assert.equal(response.status, 201);
+    const { task } = (await response.json()) as { task: { id: number; provider: string } };
+    assert.equal(task.provider, 'copilot');
+    assert.equal(h.tasks.get(task.id)!.provider, 'copilot');
+  });
+
   test('an unregistered project is refused', async () => {
     const response = await fetch(`${h.base}/api/tasks`, {
       method: 'POST',

@@ -33,6 +33,8 @@ export interface SubmitInput {
   prompt: string;
   /** Per-task model override. Validated by the caller against the catalogue. */
   model?: string | null;
+  /** Per-task agent CLI override. Validated by the caller against installed providers. */
+  provider?: string | null;
 }
 
 export type SubmitResult =
@@ -89,6 +91,7 @@ export class TaskService {
       approvalReason: risk.reason,
       origin: input.origin,
       model: input.model ?? null,
+      provider: input.provider ?? null,
     });
 
     if (needsApproval) {
@@ -157,6 +160,7 @@ export class TaskService {
       approvalReason: risk.reason,
       origin: task.origin,
       model: task.model,
+      provider: task.provider,
     });
     tasks.addEvent(created.id, 'retry', `Re-queued from task #${id}`);
 

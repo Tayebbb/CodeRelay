@@ -37,6 +37,7 @@ interface TaskRow {
   runner_pid: number | null;
   origin: string;
   model: string | null;
+  provider: string | null;
   priority: number;
 }
 
@@ -72,6 +73,7 @@ function toTask(row: TaskRow): Task {
     runnerPid: row.runner_pid,
     origin: (row.origin as TaskOrigin) ?? 'telegram',
     model: row.model,
+    provider: row.provider ?? null,
     priority: row.priority ?? 0,
   };
 }
@@ -98,8 +100,8 @@ export class TaskRepository {
     const status: TaskStatus = input.approvalRequired ? 'WAITING_APPROVAL' : 'QUEUED';
     const stmt = this.db.prepare(
       `INSERT INTO tasks (user_id, chat_id, project_id, prompt, status, created_at,
-                          approval_required, approval_status, approval_reason, usage_json, origin, model)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                          approval_required, approval_status, approval_reason, usage_json, origin, model, provider)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const info = stmt.run(
       input.userId,
@@ -114,6 +116,7 @@ export class TaskRepository {
       JSON.stringify(EMPTY_USAGE),
       input.origin ?? 'telegram',
       input.model ?? null,
+      input.provider ?? null,
     );
     const task = this.get(Number(info.lastInsertRowid))!;
     this.bus?.publish('task-created', task.id, { projectId: task.projectId, status: task.status });

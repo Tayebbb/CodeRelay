@@ -57,6 +57,15 @@ describe('task repository', () => {
     db.close();
   });
 
+  test('persists a per-task provider choice and defaults it to null', () => {
+    const { db, tasks } = repo();
+    const chosen = tasks.create({ ...NEW_TASK, provider: 'claude' });
+    assert.equal(tasks.get(chosen.id)!.provider, 'claude');
+    const plain = tasks.create(NEW_TASK);
+    assert.equal(tasks.get(plain.id)!.provider, null);
+    db.close();
+  });
+
   test('redacts secrets in the stored prompt', () => {
     const { db, tasks } = repo();
     const task = tasks.create({ ...NEW_TASK, prompt: 'use ghp_abcdefghijklmnopqrstuvwxyz0123456789 to fix it' });

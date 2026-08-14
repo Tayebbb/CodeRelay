@@ -38,15 +38,18 @@ notes.
 
 ## Commands
 
-| Command | What it does |
-| ------- | ------------- |
-| `myproject: fix the bug` | Queue a task (project prefix optional with one project) |
-| `/status` | Connection, model, queue, credits |
-| `/tasks` · `/logs <id>` | History and per-task detail |
-| `/cancel <id>` · `/retry <id>` | Stop or re-run |
-| `/approve <id>` · `/reject <id>` | Answer an approval by text |
+| Command                          | What it does                                            |
+| -------------------------------- | ------------------------------------------------------- |
+| `myproject: fix the bug`         | Queue a task (project prefix optional with one project) |
+| `/status`                        | Connection, model, queue, credits                       |
+| `/tasks` · `/logs <id>`          | History and per-task detail                             |
+| `/cancel <id>` · `/retry <id>`   | Stop or re-run                                          |
+| `/approve <id>` · `/reject <id>` | Answer an approval by text                              |
 
 Approvals also arrive as inline **APPROVE / REJECT** buttons.
+
+Tasks sent from Telegram run on the default agent CLI (`AGENT_PROVIDER`).
+Picking a different provider or model per task is a web-interface feature.
 
 ## Security model
 
@@ -59,9 +62,9 @@ Approvals also arrive as inline **APPROVE / REJECT** buttons.
 
 ## Troubleshooting
 
-| Symptom | Fix |
-| ------- | --- |
-| Bot ignores you | Your id is not in `AUTHORIZED_TELEGRAM_USER_ID` — check with @userinfobot |
-| `401 Unauthorized` at startup | Wrong token, or a second copy of the agent is polling with it |
-| `TELEGRAM_ENABLED is on but TELEGRAM_BOT_TOKEN is not set` | Fill in the token, or set `TELEGRAM_ENABLED=false` |
-| No online banner after reboot | Telegram may be unreachable; the agent retries and the web UI (if enabled) still works |
+| Symptom                                                    | Fix                                                                                    |
+| ---------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| Bot ignores you                                            | Your id is not in `AUTHORIZED_TELEGRAM_USER_ID` — check with @userinfobot              |
+| `401 Unauthorized` at startup                              | Wrong token, or a second copy of the agent is polling with it                          |
+| `TELEGRAM_ENABLED is on but TELEGRAM_BOT_TOKEN is not set` | Fill in the token, or set `TELEGRAM_ENABLED=false`                                     |
+| No online banner after reboot                              | Telegram may be unreachable; the agent retries and the web UI (if enabled) still works |

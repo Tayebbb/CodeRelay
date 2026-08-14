@@ -13,6 +13,14 @@ import { formatDuration } from './telegram/format.js';
 import { isProcessAlive, main, readPidFile } from './main.js';
 import { statusEmoji } from './domain/task.js';
 import { createPasswordFile, passwordFileExists } from './web/auth.js';
+import {
+  queryTask,
+  runInstall,
+  runUninstall,
+  startupSupported,
+  STARTUP_TASK_NAME,
+  validateBuilt,
+} from './startup/windows.js';
 
 const USAGE = `
 remote-agent — control the home-PC coding agent
@@ -33,6 +41,10 @@ remote-agent — control the home-PC coding agent
   remote-agent tasks [n]             Recent tasks
   remote-agent logs <id>             Event log for a task
   remote-agent test                  Self-test: config, db, registry, detection (no AI calls)
+
+  remote-agent startup install       Start automatically at Windows logon (+ crash restart)
+  remote-agent startup status        Auto-start and agent process status
+  remote-agent startup remove        Remove auto-start (keeps all data and config)
 
   remote-agent web setup             Create (or replace) the web interface password
 `;
@@ -375,6 +387,97 @@ async function cmdWeb(args: string[]): Promise<number> {
   return 0;
 }
 
+async function cmdStartup(args: string[]): Promise<number> {
+  const [sub] = args;
+  if (!startupSupported()) {
+    console.error('Auto-start management is Windows-only (per-user Scheduled Task). On other systems use your init system.');
+    return 1;
+  }
+
+  switch (sub) {
+    case 'install': {
+      const buildProblem = validateBuilt();
+      if (buildProblem) {
+        console.error(buildProblem);
+        return 1;
+      }
+      // Prove the agent can actually start before wiring it to logon: a broken
+      // .env would otherwise become a restart loop the operator never sees.
+      config();
+
+      const result = await runInstall(process.execPath);
+      if (!result.ok) {
+        console.error(`Could not install the startup task:\n${result.output}`);
+        return 1;
+      }
+      const facts = await queryTask();
+      console.log(
+        [
+          '',
+          '✓ CodeRelay startup installed',
+          '',
+          `  Method:          Windows Scheduled Task "${STARTUP_TASK_NAME}" (per-user, not elevated)`,
+          `  Trigger:         at logon, keeps running after the terminal closes`,
+          `  Working dir:     ${facts?.workingDirectory ?? PROJECT_ROOT}`,
+          `  Command:         ${facts ? `${facts.execute} ${facts.arguments}` : '(query failed — see startup status)'}`,
+          `  Restart policy:  ${facts?.restartCount ?? '?'} restarts, ${facts?.restartInterval ?? 'PT1M'} apart, after unexpected exit`,
+          '',
+          '  Installing again is safe: the task is replaced, never duplicated.',
+          '  Starting the agent NEVER starts an AI task — it only comes online and waits.',
+          '',
+          `  Start it now:    Start-ScheduledTask -TaskName ${STARTUP_TASK_NAME}`,
+          '',
+        ].join('\n'),
+      );
+      return 0;
+    }
+
+    case 'status': {
+      const facts = await queryTask();
+      const cfg = config();
+      const pid = readPidFile(path.join(cfg.storage.workspace, 'agent.pid'));
+      const alive = pid !== null && isProcessAlive(pid);
+      const version = (() => {
+        try {
+          return (JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT, 'package.json'), 'utf8')) as { version?: string })
+            .version ?? 'unknown';
+        } catch {
+          return 'unknown';
+        }
+      })();
+      console.log(
+        [
+          '',
+          'CodeRelay Startup',
+          '',
+          `  Auto-start:      ${facts ? `Enabled (Scheduled Task "${STARTUP_TASK_NAME}", state ${facts.state})` : 'Not installed'}`,
+          `  Restart policy:  ${facts ? `${facts.restartCount ?? '?'} restarts, ${facts.restartInterval ?? '?'} apart` : '—'}`,
+          `  Working dir:     ${facts?.workingDirectory ?? '—'}`,
+          `  Agent process:   ${alive ? `RUNNING (pid ${pid})` : 'STOPPED'}`,
+          `  Version:         ${version}`,
+          '',
+          facts ? '' : `  Install with:    npm run agent -- startup install`,
+        ].join('\n'),
+      );
+      return 0;
+    }
+
+    case 'remove': {
+      const result = await runUninstall();
+      if (!result.ok) {
+        console.error(`Could not remove the startup task:\n${result.output}`);
+        return 1;
+      }
+      console.log('\n✓ CodeRelay startup removed\n\nCodeRelay itself, your projects, task history and configuration are untouched.\n');
+      return 0;
+    }
+
+    default:
+      console.error('Usage: remote-agent startup <install|status|remove>');
+      return 1;
+  }
+}
+
 export async function runCli(argv: string[]): Promise<number> {
   const [command, ...args] = argv;
 
@@ -425,6 +528,8 @@ export async function runCli(argv: string[]): Promise<number> {
         return await cmdSelfTest();
       case 'web':
         return await cmdWeb(args);
+      case 'startup':
+        return await cmdStartup(args);
       default:
         console.error(`Unknown command "${command}".\n${USAGE}`);
         return 1;

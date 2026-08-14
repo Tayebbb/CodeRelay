@@ -89,6 +89,12 @@ const MIGRATIONS: Array<{ id: number; sql: string }> = [
       CREATE INDEX IF NOT EXISTS idx_tasks_queue ON tasks(status, priority DESC, id ASC);
     `,
   },
+  {
+    id: 5,
+    sql: `
+      ALTER TABLE tasks ADD COLUMN provider TEXT;
+    `,
+  },
 ];
 
 export class DatabaseCorruptError extends Error {}

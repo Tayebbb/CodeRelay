@@ -4,11 +4,18 @@
 #
 # Uses a per-user Scheduled Task. No admin rights, no service install, no cost.
 
+param(
+    # Node executable to run the agent with; defaults to the one on PATH.
+    # `remote-agent startup install` passes its own node so the task never
+    # depends on what PATH looks like at logon.
+    [string]$NodeExe = ''
+)
+
 $ErrorActionPreference = 'Stop'
 
 $root = Split-Path -Parent $PSScriptRoot
 $taskName = 'RemotePersonalCodingAgent'
-$nodeExe = (Get-Command node -ErrorAction Stop).Source
+$nodeExe = if ($NodeExe -and (Test-Path $NodeExe)) { $NodeExe } else { (Get-Command node -ErrorAction Stop).Source }
 $entry = Join-Path $root 'dist\src\main.js'
 
 if (-not (Test-Path $entry)) {

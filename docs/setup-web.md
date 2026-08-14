@@ -29,19 +29,20 @@ npm start
 # → Web interface: http://127.0.0.1:8787
 ```
 
-Sign in with the password you created. You can now select a project, pick a
-model, choose a mode (Code / Plan / Review / Debug / Ask), send a task, watch
+Sign in with the password you created. You can now select a project, pick the
+agent CLI and model (any installed, signed-in provider — Copilot or Claude
+Code), choose a mode (Code / Plan / Review / Debug / Ask), send a task, watch
 it stream live, review the diff, and answer approval cards — from any device
 that can reach the page, including your phone.
 
 ## What the web UI can and cannot do
 
-| Can | Cannot |
-| --- | ------ |
-| Create, watch, cancel, retry tasks | Register or remove projects (CLI only, by design) |
-| Pick the model per task (from the installed CLI's real catalogue) | Switch the agent provider per task (`AGENT_PROVIDER` is a server setting) |
-| Answer approval requests | Bypass any approval — it calls the same gate Telegram does |
-| View diffs, timelines, usage | Browse your filesystem — only registered project metadata is exposed |
+| Can                                                                                                  | Cannot                                                               |
+| ---------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| Create, watch, cancel, retry tasks                                                                   | Register or remove projects (CLI only, by design)                    |
+| Pick the agent CLI **and** model per task — any installed, signed-in provider (Copilot, Claude Code) | Install or sign in to an agent CLI — that happens on the PC          |
+| Answer approval requests                                                                             | Bypass any approval — it calls the same gate Telegram does           |
+| View diffs, timelines, usage                                                                         | Browse your filesystem — only registered project metadata is exposed |
 
 ## Install it like an app (PWA)
 
@@ -50,13 +51,13 @@ application shell cached for instant launches. **No task data, git information
 or session material is ever cached** — the service worker refuses to touch
 `/api/` entirely, and going offline never affects the task running on the PC.
 
-| Platform | How |
-| -------- | --- |
-| iPhone / iPad | Open in Safari → Share → **Add to Home Screen** |
-| Android | Chrome → menu → **Install app** (or accept the in-app prompt) |
-| Desktop | Chromium browsers show an install icon in the address bar |
+| Platform      | How                                                           |
+| ------------- | ------------------------------------------------------------- |
+| iPhone / iPad | Open in Safari → Share → **Add to Home Screen**               |
+| Android       | Chrome → menu → **Install app** (or accept the in-app prompt) |
+| Desktop       | Chromium browsers show an install icon in the address bar     |
 
-Installation requires a *secure context*: `http://127.0.0.1` and
+Installation requires a _secure context_: `http://127.0.0.1` and
 `http://localhost` qualify, plain HTTP over the LAN does not. From a phone,
 reach the PC through a private tunnel (WireGuard/Tailscale, which can provide
 HTTPS) or an SSH tunnel to localhost — the same approaches recommended under
@@ -68,7 +69,7 @@ internet but the agent doesn't answer — it reconnects and resyncs
 automatically, and running tasks continue on the PC), and **No internet
 connection** (this device is offline; history stays readable).
 
-*Testing honesty:* the service worker, cache contents, offline shell and
+_Testing honesty:_ the service worker, cache contents, offline shell and
 Android-style install criteria were verified in a real desktop Chromium.
 iOS-specific behaviour (Add to Home Screen, status-bar rendering, safe areas
 on a notched device) follows Apple's documented metadata but has **not** been
@@ -99,6 +100,23 @@ options, in order of recommendation:
 1. **Private network (recommended):** a WireGuard or Tailscale-style tunnel
    into your home network. The agent stays bound to a private address; your
    phone joins the network. Zero exposed ports, works from anywhere.
+
+   Concretely, with Tailscale — run on the PC (PowerShell):
+
+   ```powershell
+   winget install --id Tailscale.Tailscale -e     # install
+   tailscale up                                   # opens a browser — sign in
+   tailscale ip -4                                # note the 100.x.x.x address
+
+   Add-Content .env "WEB_HOST=<the 100.x.x.x address>"
+   npm start                                      # or restart the scheduled task
+   ```
+
+   Then install the Tailscale app on your phone, sign in with the **same
+   account**, and browse `http://<the 100.x.x.x address>:8787` — from any
+   city, on any connection. The Telegram interface needs none of this: the
+   bot polls outward, so it works remotely with zero network setup.
+
 2. **SSH tunnel:** `ssh -L 8787:127.0.0.1:8787 you@home-pc` from the machine
    you are on, then browse `localhost:8787`.
 3. **LAN only:** set `WEB_HOST` to your LAN address for use at home.
@@ -109,10 +127,10 @@ the same machine and keep the hop on loopback.
 
 ## Troubleshooting
 
-| Symptom | Fix |
-| ------- | --- |
-| `The web interface is enabled but has no password yet` | `npm run agent -- web setup` |
-| Signed out unexpectedly | The agent restarted — sessions are memory-only, sign in again |
-| `Too many attempts` | Wait 15 minutes; the login throttle has closed |
-| Page loads, data never appears | You are opening a different host/port than the one printed at startup |
-| Live updates stop after a network change | The page reconnects automatically; give it a few seconds or reload |
+| Symptom                                                | Fix                                                                   |
+| ------------------------------------------------------ | --------------------------------------------------------------------- |
+| `The web interface is enabled but has no password yet` | `npm run agent -- web setup`                                          |
+| Signed out unexpectedly                                | The agent restarted — sessions are memory-only, sign in again         |
+| `Too many attempts`                                    | Wait 15 minutes; the login throttle has closed                        |
+| Page loads, data never appears                         | You are opening a different host/port than the one printed at startup |
+| Live updates stop after a network change               | The page reconnects automatically; give it a few seconds or reload    |

@@ -97,6 +97,8 @@ export interface Task {
   origin: TaskOrigin;
   /** Per-task model override; null uses the configured default. */
   model: string | null;
+  /** Per-task agent CLI override; null uses the configured AGENT_PROVIDER. */
+  provider: string | null;
   /** Queue precedence: higher first, then FIFO by id. 0 = normal. */
   priority: number;
 }
@@ -110,6 +112,7 @@ export interface NewTask {
   approvalReason: string | null;
   origin?: TaskOrigin;
   model?: string | null;
+  provider?: string | null;
 }
 
 export const EMPTY_USAGE: TaskUsage = { aiCredits: 0, outputTokens: 0, copilotSessionIds: [], unreportedRuns: 0 };
