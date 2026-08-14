@@ -103,6 +103,33 @@ export function parseJsonlLine(line: string): CopilotEnvelope | null {
   }
 }
 
+/**
+ * Incremental line reader for a streaming stdout. Provider-agnostic: splitting
+ * on newlines is common to every agent CLI, while interpreting a line is not.
+ */
+export class LineStream {
+  private buffer = '';
+
+  push(chunk: string): string[] {
+    this.buffer += chunk;
+    const out: string[] = [];
+    let index: number;
+    while ((index = this.buffer.indexOf('\n')) !== -1) {
+      out.push(this.buffer.slice(0, index));
+      this.buffer = this.buffer.slice(index + 1);
+    }
+    // A single pathological line must not grow without bound.
+    if (this.buffer.length > 4_000_000) this.buffer = this.buffer.slice(-1_000_000);
+    return out;
+  }
+
+  flush(): string[] {
+    const rest = this.buffer;
+    this.buffer = '';
+    return rest.trim() ? [rest] : [];
+  }
+}
+
 /** Incremental newline-delimited JSON reader for a streaming stdout. */
 export class JsonlStream {
   private buffer = '';

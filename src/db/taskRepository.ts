@@ -7,11 +7,13 @@ import {
   type ApprovalStatus,
   type NewTask,
   type Task,
+  type TaskOrigin,
   type TaskResultDetail,
   type TaskStatus,
   type TaskUsage,
 } from '../domain/task.js';
 import { redact } from '../core/redact.js';
+import type { EventBus } from '../core/events.js';
 
 interface TaskRow {
   id: number;
@@ -33,6 +35,9 @@ interface TaskRow {
   approval_reason: string | null;
   usage_json: string;
   runner_pid: number | null;
+  origin: string;
+  model: string | null;
+  priority: number;
 }
 
 function parseJson<T>(raw: string | null, fallback: T): T {
@@ -65,6 +70,9 @@ function toTask(row: TaskRow): Task {
     approvalReason: row.approval_reason,
     usage: { ...EMPTY_USAGE, ...parseJson<Partial<TaskUsage>>(row.usage_json, {}) },
     runnerPid: row.runner_pid,
+    origin: (row.origin as TaskOrigin) ?? 'telegram',
+    model: row.model,
+    priority: row.priority ?? 0,
   };
 }
 
@@ -78,15 +86,20 @@ export interface TaskEvent {
 }
 
 export class TaskRepository {
-  constructor(private readonly db: Db) {}
+  // Optional so headless CLI commands and tests need no bus. Every interface
+  // observes the same repository, so this single tap keeps them in agreement.
+  constructor(
+    private readonly db: Db,
+    private readonly bus?: EventBus,
+  ) {}
 
   create(input: NewTask): Task {
     const now = Date.now();
     const status: TaskStatus = input.approvalRequired ? 'WAITING_APPROVAL' : 'QUEUED';
     const stmt = this.db.prepare(
       `INSERT INTO tasks (user_id, chat_id, project_id, prompt, status, created_at,
-                          approval_required, approval_status, approval_reason, usage_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                          approval_required, approval_status, approval_reason, usage_json, origin, model)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const info = stmt.run(
       input.userId,
@@ -99,8 +112,12 @@ export class TaskRepository {
       input.approvalRequired ? 'PENDING' : 'NONE',
       input.approvalReason,
       JSON.stringify(EMPTY_USAGE),
+      input.origin ?? 'telegram',
+      input.model ?? null,
     );
-    return this.get(Number(info.lastInsertRowid))!;
+    const task = this.get(Number(info.lastInsertRowid))!;
+    this.bus?.publish('task-created', task.id, { projectId: task.projectId, status: task.status });
+    return task;
   }
 
   get(id: number): Task | null {
@@ -120,6 +137,31 @@ export class TaskRepository {
     return rows.map(toTask);
   }
 
+  /** Queued tasks in exactly the order the claimer will take them. */
+  queuedInOrder(): Task[] {
+    const rows = this.db
+      .prepare("SELECT * FROM tasks WHERE status = 'QUEUED' ORDER BY priority DESC, id ASC")
+      .all() as unknown as TaskRow[];
+    return rows.map(toTask);
+  }
+
+  /**
+   * Move a queued task to the front. The only reorder primitive on purpose:
+   * arbitrary position editing invites races with the claimer, while "front"
+   * is one atomic update. Returns false when the task is not QUEUED.
+   */
+  promote(id: number): boolean {
+    const info = this.db
+      .prepare(
+        `UPDATE tasks SET priority = (SELECT COALESCE(MAX(priority), 0) + 1 FROM tasks WHERE status = 'QUEUED')
+         WHERE id = ? AND status = 'QUEUED'`,
+      )
+      .run(id);
+    if (info.changes === 0) return false;
+    this.addEvent(id, 'queue', 'Moved to the front of the queue');
+    return true;
+  }
+
   countActive(): number {
     const row = this.db
       .prepare("SELECT COUNT(*) AS n FROM tasks WHERE status IN ('RUNNING','TESTING')")
@@ -128,16 +170,32 @@ export class TaskRepository {
   }
 
   /**
-   * Claim the oldest queued task atomically; returns null if none is available.
-   * Projects listed in `busyProjects` are skipped so two tasks never share a
-   * working tree.
+   * Claim the oldest eligible queued task atomically; null if none.
+   *
+   * Eligibility is enforced IN THE DATABASE, not just by the caller's
+   * in-memory set: a task is skipped while any OLDER task for the same project
+   * is running, testing, or parked on a pre-execution approval. That is the
+   * single-worker-per-project rule and the "approval holds the project's
+   * queue" rule in one place, and it survives restarts.
+   *
+   * Order: explicit promotions first, then strict FIFO by id.
    */
   claimNextQueued(pid: number, busyProjects: string[] = []): Task | null {
     for (let attempt = 0; attempt < 20; attempt += 1) {
       const placeholders = busyProjects.map(() => '?').join(',');
-      const sql = busyProjects.length
-        ? `SELECT * FROM tasks WHERE status = 'QUEUED' AND project_id NOT IN (${placeholders}) ORDER BY id ASC LIMIT 1`
-        : "SELECT * FROM tasks WHERE status = 'QUEUED' ORDER BY id ASC LIMIT 1";
+      const busyClause = busyProjects.length ? `AND t.project_id NOT IN (${placeholders})` : '';
+      const sql = `
+        SELECT t.* FROM tasks t
+        WHERE t.status = 'QUEUED'
+          ${busyClause}
+          AND NOT EXISTS (
+            SELECT 1 FROM tasks b
+            WHERE b.project_id = t.project_id
+              AND b.id < t.id
+              AND b.status IN ('RUNNING', 'TESTING', 'WAITING_APPROVAL')
+          )
+        ORDER BY t.priority DESC, t.id ASC
+        LIMIT 1`;
 
       const row = this.db.prepare(sql).get(...busyProjects) as TaskRow | undefined;
       if (!row) return null;
@@ -211,7 +269,9 @@ export class TaskRepository {
 
     values.push(id);
     this.db.prepare(`UPDATE tasks SET ${fields.join(', ')} WHERE id = ?`).run(...values);
-    this.addEvent(id, 'status', `${current.status} -> ${to}`);
+    // A same-status "transition" is a patch write; logging it is noise.
+    if (current.status !== to) this.addEvent(id, 'status', `${current.status} -> ${to}`);
+    this.bus?.publish('task-status', id, { status: to, error: patch.error ?? null });
     return this.get(id)!;
   }
 
@@ -237,6 +297,9 @@ export class TaskRepository {
 
   setApproval(id: number, status: ApprovalStatus): void {
     this.db.prepare('UPDATE tasks SET approval_status = ? WHERE id = ?').run(status, id);
+    if (status !== 'NONE' && status !== 'PENDING') {
+      this.bus?.publish('approval-resolved', id, { decision: status });
+    }
   }
 
   incrementRetry(id: number): number {
@@ -245,9 +308,11 @@ export class TaskRepository {
   }
 
   addEvent(taskId: number, kind: string, message: string, meta?: Record<string, unknown>): void {
+    const safe = redact(message).slice(0, 4000);
     this.db
       .prepare('INSERT INTO task_events (task_id, ts, kind, message, meta) VALUES (?, ?, ?, ?, ?)')
-      .run(taskId, Date.now(), kind, redact(message).slice(0, 4000), meta ? redact(JSON.stringify(meta)) : null);
+      .run(taskId, Date.now(), kind, safe, meta ? redact(JSON.stringify(meta)) : null);
+    this.bus?.publish('task-log', taskId, { logKind: kind, message: safe });
   }
 
   events(taskId: number, limit = 200): TaskEvent[] {

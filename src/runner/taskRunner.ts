@@ -11,12 +11,12 @@ import type { DetectedCommand } from '../verify/detector.js';
 import { describeManifestDiff, diffManifests, fingerprintManifests } from '../verify/integrity.js';
 import { execCommand, tailLines } from '../util/exec.js';
 import { insufficientDiskSpace } from '../util/disk.js';
-import { buildPermissionPolicy } from '../copilot/permissions.js';
 import { buildChildEnv } from '../copilot/childEnv.js';
 import { runCopilot, type CopilotRunResult } from '../copilot/executor.js';
 import type { CopilotInfo, CopilotLauncher } from '../copilot/detect.js';
 import { selectModel } from '../copilot/detect.js';
 import { ProgressReporter, type Notifier } from '../notify/notifier.js';
+import type { EventBus } from '../core/events.js';
 import type { ApprovalService } from '../approval/service.js';
 import { buildExplorerPrompt, buildReviewPrompt, buildTaskPrompt } from './promptBuilder.js';
 import { prepareRepository } from './preflight.js';
@@ -24,6 +24,7 @@ import { publishChanges } from './publish.js';
 import { decideAfterCopilot, UNREPORTED_USAGE_FAILURE } from './stopReason.js';
 import { classifyTask, escalate, shouldReview } from '../orchestrator/plan.js';
 import { assessConfidence, parseReview, type ConfidenceResult } from '../orchestrator/confidence.js';
+import { selectProvider, type AgentProvider } from '../providers/index.js';
 import { formatReport } from '../telegram/format.js';
 
 const log = createLogger('runner');
@@ -38,6 +39,7 @@ export interface TaskRunnerDeps {
   notifier: Notifier;
   approvals: ApprovalService;
   copilot: CopilotInfo;
+  bus?: EventBus;
 }
 
 export interface RunOutcome {
@@ -66,7 +68,7 @@ export class TaskRunner {
     const controller = new AbortController();
     this.cancellations.set(task.id, controller);
 
-    const reporter = new ProgressReporter({ chatId: task.chatId, taskId: task.id, notifier });
+    const reporter = new ProgressReporter({ chatId: task.chatId, taskId: task.id, notifier, bus: this.deps.bus });
     const startedAt = Date.now();
     // Seeded from what this task has ALREADY spent, not from zero. A recovered
     // task keeps its usage in the database; starting the in-memory counter at
@@ -144,7 +146,14 @@ export class TaskRunner {
         );
       }
 
-      const selection = selectModel(config.copilot.model, config.copilot.modelFallback, copilot.models);
+      // A per-task model override (chosen in an interface) outranks the
+      // configured default, but only when the installed CLI actually offers it —
+      // the fallback chain stays intact either way.
+      const requestedModel = task.model && copilot.models.includes(task.model) ? task.model : config.copilot.model;
+      if (task.model && requestedModel !== task.model) {
+        tasks.addEvent(task.id, 'model', `Requested model "${task.model}" is not offered by this CLI; using default`);
+      }
+      const selection = selectModel(requestedModel, config.copilot.modelFallback, copilot.models);
       // The catalogue is not an entitlement: a listed model can still be refused
       // at run time once its allowance is spent, so this can change mid-task.
       let activeModel = selection.model;
@@ -201,12 +210,11 @@ export class TaskRunner {
       } = prepared.repository;
       checkpointRef = prepared.repository.checkpointRef ?? undefined;
 
-      // ---- Copilot execution with bounded recovery ---------------------------------
-      const policy = buildPermissionPolicy({
-        allowedUrls: config.safety.allowedUrls,
-        extraDeniedCommands: config.safety.extraDeniedCommands,
-        extraDirs: project.extraDirs ?? [],
-      });
+      // ---- Agent execution with bounded recovery -----------------------------------
+      // Resolved per task so a configuration change takes effect without a
+      // restart, and so a capability-deficient provider fails here rather than
+      // silently running with weaker protections.
+      const provider = selectProvider(config.provider);
 
       const deadline = startedAt + config.limits.maxTaskDurationMs;
       // APPROVAL_TIMEOUT_MINUTES defaults to 60 while MAX_TASK_DURATION_MINUTES
@@ -249,13 +257,13 @@ export class TaskRunner {
           project,
           launcher,
           model: activeModel,
-          policyArgs: policy.args,
+          provider,
           config,
           signal: controller.signal,
           deadline,
           creditBudget: config.limits.maxAiCreditsPerTask,
           changedFiles: async () => (isRepo ? await git.diffNameOnly(checkpointCommit ?? baseCommit) : []),
-          onProgress: (t) => reporter.update(t),
+          onProgress: (t) => reporter.update(t, 'agent'),
         });
         const survey = surveyRun.result;
         agentCalls += 1;
@@ -342,27 +350,34 @@ export class TaskRunner {
 
         copilotResult = await runCopilot({
           launcher,
+          provider,
+          args: provider.buildArgs({
+            prompt,
+            model: activeModel,
+            effort: config.copilot.effort,
+            agent: config.copilot.agent,
+            autopilot: config.copilot.autopilot,
+            maxAutopilotContinues: config.copilot.maxAutopilotContinues,
+            extraDeniedCommands: config.safety.extraDeniedCommands,
+            allowedUrls: config.safety.allowedUrls,
+            extraDirs: project.extraDirs ?? [],
+            readOnly: false,
+            budget: config.limits.maxAiCreditsPerTask,
+            sandbox: config.copilot.sandbox,
+            secretEnvVars: SECRET_ENV_VARS,
+            allowRepoInstructions: config.safety.allowRepoInstructions,
+            allowRepoMcp: config.safety.githubMcp,
+          }),
           cwd: project.path,
-          prompt,
-          model: activeModel,
-          effort: config.copilot.effort,
-          agent: config.copilot.agent,
-          autopilot: config.copilot.autopilot,
-          maxAutopilotContinues: config.copilot.maxAutopilotContinues,
-          permissionArgs: policy.args,
           timeoutMs: Math.min(remainingMs, config.limits.maxTaskDurationMs),
           maxTurns: Math.max(20, config.copilot.maxAutopilotContinues * 10),
           creditBudget: config.limits.maxAiCreditsPerTask,
-          sandbox: config.copilot.sandbox,
-          secretEnvVars: SECRET_ENV_VARS,
           envPassthrough: config.safety.envPassthrough,
-          allowRepoInstructions: config.safety.allowRepoInstructions,
-          githubMcp: config.safety.githubMcp,
           signal: controller.signal,
           onProgress: (update) => {
-            if (update.kind === 'tool') reporter.update(`🛠 ${update.text}`);
-            else if (update.kind === 'thinking') reporter.update(`💭 ${update.text.split('\n')[0]?.slice(0, 160)}`);
-            else if (update.kind === 'message') reporter.update(`🤖 ${update.text.split('\n')[0]?.slice(0, 200)}`);
+            if (update.kind === 'tool') reporter.update(`🛠 ${update.text}`, 'agent');
+            else if (update.kind === 'thinking') reporter.update(`💭 ${update.text.split('\n')[0]?.slice(0, 160)}`, 'agent');
+            else if (update.kind === 'message') reporter.update(`🤖 ${update.text.split('\n')[0]?.slice(0, 200)}`, 'agent');
             else if (update.kind === 'limit' || update.kind === 'warning') reporter.update(`⚠️ ${update.text}`);
           },
         });
@@ -558,13 +573,13 @@ export class TaskRunner {
             project,
             launcher,
             model: activeModel,
-            policyArgs: policy.args,
+            provider,
             config,
             signal: controller.signal,
             deadline,
             creditBudget: config.limits.maxAiCreditsPerTask,
             changedFiles: async () => (isRepo ? await git.diffNameOnly(reviewBase) : []),
-            onProgress: (t) => reporter.update(t),
+            onProgress: (t) => reporter.update(t, 'agent'),
           });
           agentCalls += 1;
           reviewsDone += 1;
@@ -791,8 +806,8 @@ export class TaskRunner {
     prompt: string;
     project: ProjectRecord;
     launcher: CopilotLauncher;
+    provider: AgentProvider;
     model: string;
-    policyArgs: string[];
     config: AppConfig;
     signal: AbortSignal;
     deadline: number;
@@ -812,23 +827,30 @@ export class TaskRunner {
 
     const result = await runCopilot({
       launcher: options.launcher,
+      provider: options.provider,
+      args: options.provider.buildArgs({
+        prompt: options.prompt,
+        model: options.model,
+        effort: config.copilot.effort,
+        agent: config.copilot.agent,
+        // Advisory passes are single-shot: no autopilot continuations, few turns.
+        autopilot: false,
+        maxAutopilotContinues: 1,
+        extraDeniedCommands: config.safety.extraDeniedCommands,
+        allowedUrls: config.safety.allowedUrls,
+        extraDirs: options.project.extraDirs ?? [],
+        readOnly: true,
+        budget: options.creditBudget,
+        sandbox: config.copilot.sandbox,
+        secretEnvVars: SECRET_ENV_VARS,
+        allowRepoInstructions: config.safety.allowRepoInstructions,
+        allowRepoMcp: config.safety.githubMcp,
+      }),
       cwd: options.project.path,
-      prompt: options.prompt,
-      model: options.model,
-      effort: config.copilot.effort,
-      agent: config.copilot.agent,
-      // Advisory passes are single-shot: no autopilot continuations, few turns.
-      autopilot: false,
-      maxAutopilotContinues: 1,
-      permissionArgs: [...options.policyArgs, '--deny-tool=write'],
       timeoutMs: Math.max(30_000, Math.min(remaining, config.limits.maxTaskDurationMs)),
       maxTurns: 12,
       creditBudget: options.creditBudget,
-      sandbox: config.copilot.sandbox,
-      secretEnvVars: SECRET_ENV_VARS,
       envPassthrough: config.safety.envPassthrough,
-      allowRepoInstructions: config.safety.allowRepoInstructions,
-      githubMcp: config.safety.githubMcp,
       signal: options.signal,
       onProgress: (update) => {
         if (update.kind === 'tool') options.onProgress(`🛠 ${update.text}`);

@@ -12,7 +12,11 @@ import { ApprovalService } from './approval/service.js';
 import { TaskRunner } from './runner/taskRunner.js';
 import { TaskQueue } from './runner/queue.js';
 import { TelegramBot } from './telegram/bot.js';
-import { nullNotifier, type Notifier } from './notify/notifier.js';
+import { fanOutNotifier, nullNotifier, type Notifier } from './notify/notifier.js';
+import { EventBus } from './core/events.js';
+import { TaskService } from './core/taskService.js';
+import { WebServer, webNotifier } from './web/server.js';
+import { passwordFileExists } from './web/auth.js';
 import { acquireLock, isProcessAlive } from './core/lock.js';
 import { isTerminal } from './domain/task.js';
 import { Git } from './git/git.js';
@@ -67,6 +71,19 @@ export async function main(): Promise<number> {
 
   configureLogger({ level: config.logLevel, directory: config.storage.logDirectory });
   log.info('Starting remote coding agent', { workspace: config.storage.workspace });
+
+  // With no interface there is no way to command or observe the agent — that
+  // is a misconfiguration, not a valid headless mode.
+  if (!config.interfaces.telegram && !config.interfaces.web) {
+    console.error(
+      '\nNo interface is enabled. Set TELEGRAM_ENABLED=true (with bot credentials), WEB_ENABLED=true, or both.\n',
+    );
+    return 2;
+  }
+  if (config.interfaces.web && !passwordFileExists(config.web.authFile)) {
+    console.error('\nThe web interface is enabled but has no password yet.\nCreate one with:  npm run agent -- web setup\n');
+    return 2;
+  }
 
   /**
    * Tell the operator why we are refusing to start, THEN exit.
@@ -133,7 +150,8 @@ export async function main(): Promise<number> {
     );
   }
 
-  const tasks = new TaskRepository(db);
+  const bus = new EventBus();
+  const tasks = new TaskRepository(db, bus);
   tasks.pruneHistory();
 
   const projects = new ProjectRegistry(config.storage.projectsFile);
@@ -166,20 +184,35 @@ export async function main(): Promise<number> {
   };
 
   const approvals = new ApprovalService(tasks, notifier, config.limits.approvalTimeoutMs);
-  const runner = new TaskRunner({ config, tasks, projects, notifier, approvals, copilot });
+  const runner = new TaskRunner({ config, tasks, projects, notifier, approvals, copilot, bus });
   const queue = new TaskQueue(tasks, runner, { maxConcurrent: config.limits.maxConcurrentTasks });
+  const service = new TaskService({ config, tasks, projects, queue, runner, approvals, notifier });
 
-  const bot = new TelegramBot({
-    config,
-    tasks,
-    projects,
-    queue,
-    runner,
-    approvals,
-    copilot,
-    startedAt: Date.now(),
-  });
-  notifierTarget = bot;
+  const bot = config.interfaces.telegram
+    ? new TelegramBot({
+        config,
+        tasks,
+        projects,
+        queue,
+        runner,
+        approvals,
+        service,
+        copilot,
+        startedAt: Date.now(),
+      })
+    : null;
+
+  let web: WebServer | null = null;
+  if (config.interfaces.web) {
+    web = new WebServer({ config, tasks, projects, queue, approvals, service, copilot, bus, startedAt: Date.now() });
+  }
+
+  // Approval requests reach every enabled interface; the task proceeds if at
+  // least one heard it.
+  const targets: Notifier[] = [];
+  if (bot) targets.push(bot);
+  if (web) targets.push(webNotifier(bus));
+  notifierTarget = fanOutNotifier(targets);
 
   queue.start();
 
@@ -208,7 +241,8 @@ export async function main(): Promise<number> {
 
     // Stop polling FIRST: otherwise a task or approval created during the drain
     // below would be missed by cancelAll() and could block shutdown for minutes.
-    await bot.stopAcceptingUpdates().catch(() => {});
+    await bot?.stopAcceptingUpdates().catch(() => {});
+    await web?.stop().catch(() => {});
     approvals.cancelAll();
 
     // Wait for in-flight work so its terminal state is written BEFORE the
@@ -230,7 +264,7 @@ export async function main(): Promise<number> {
       }
     }
 
-    await bot.drainApprovalFlows().catch(() => {});
+    await service.drain().catch(() => {});
     try {
       db.close();
     } catch {
@@ -264,6 +298,7 @@ export async function main(): Promise<number> {
     `Copilot CLI: v${copilot.version} (${copilot.authenticatedUser})`,
     `Model: ${selection.model}${selection.fellBack ? ` (fallback from ${selection.requested})` : ''}`,
     `Projects: ${projects.enabled().length}`,
+    `Interfaces: ${[config.interfaces.telegram ? 'Telegram' : null, config.interfaces.web ? 'Web' : null].filter(Boolean).join(' + ')}`,
     `Sandbox: ${config.copilot.sandbox ? 'on (experimental)' : 'off'}`,
     ...recovery.requeued.map(
       (task) =>
@@ -281,8 +316,27 @@ export async function main(): Promise<number> {
     .filter(Boolean)
     .join('\n');
 
-  // Sent after polling starts so it is not lost when the network is not up yet.
-  await bot.start({ onReady: () => void bot.notifyOperators(banner).catch(() => {}) });
+  // The web server starts first: it has no external dependency and must be
+  // reachable even when Telegram (or the network to it) is down.
+  if (web) {
+    try {
+      await web.start();
+      console.log(`\nWeb interface: ${web.address()}\n`);
+    } catch (err) {
+      await shutdown('web-start-failed', 7);
+      return await abort(7, `The web interface could not start: ${errorMessage(err)}`);
+    }
+  }
+
+  if (bot) {
+    // Sent after polling starts so it is not lost when the network is not up yet.
+    await bot.start({ onReady: () => void bot.notifyOperators(banner).catch(() => {}) });
+  } else {
+    log.info('Telegram interface disabled');
+    // Without Telegram the process has no grammY loop to hold it open; the web
+    // server and queue keep it alive instead.
+    await new Promise(() => {});
+  }
   return 0;
 }
 

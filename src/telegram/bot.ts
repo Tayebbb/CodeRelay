@@ -7,7 +7,7 @@ import type { ProjectRegistry } from '../projects/registry.js';
 import type { TaskQueue } from '../runner/queue.js';
 import type { TaskRunner } from '../runner/taskRunner.js';
 import type { ApprovalService } from '../approval/service.js';
-import { assessRisk } from '../approval/risk.js';
+import type { TaskService } from '../core/taskService.js';
 import type { ApprovalRequest, Notifier } from '../notify/notifier.js';
 import type { CopilotInfo } from '../copilot/detect.js';
 import { selectModel } from '../copilot/detect.js';
@@ -21,7 +21,6 @@ import {
   HELP_TEXT,
   truncate,
 } from './format.js';
-import { isTerminal } from '../domain/task.js';
 
 const log = createLogger('telegram');
 
@@ -34,12 +33,10 @@ export interface TelegramBotDeps {
   queue: TaskQueue;
   runner: TaskRunner;
   approvals: ApprovalService;
+  service: TaskService;
   copilot: CopilotInfo;
   startedAt: number;
 }
-
-const MAX_PROMPT_LENGTH = 4000;
-const MAX_QUEUED_TASKS = 20;
 
 /** Bound on outbox pages per flush, so a huge backlog cannot spin forever. */
 const MAX_OUTBOX_PAGES = 50;
@@ -53,8 +50,6 @@ export class TelegramBot implements Notifier {
   private healthTimer: NodeJS.Timeout | null = null;
   private stopping = false;
   private flushing = false;
-  /** Detached approval flows, awaited on shutdown so their writes are not lost. */
-  private readonly pendingApprovalFlows = new Set<Promise<void>>();
 
   constructor(private readonly deps: TelegramBotDeps) {
     this.bot = new Bot(deps.config.telegram.botToken);
@@ -272,9 +267,9 @@ export class TelegramBot implements Notifier {
 
   /** Let detached approval flows finish writing, bounded so shutdown cannot hang. */
   async drainApprovalFlows(graceMs = 5_000): Promise<void> {
-    if (this.pendingApprovalFlows.size === 0) return;
+    // Approval flows live in the shared TaskService now; bounded there too.
     await Promise.race([
-      Promise.allSettled([...this.pendingApprovalFlows]),
+      this.deps.service.drain(),
       new Promise((resolve) => setTimeout(resolve, graceMs).unref?.()),
     ]);
   }
@@ -348,7 +343,7 @@ export class TelegramBot implements Notifier {
   }
 
   private registerCommands(): void {
-    const { tasks, projects, queue, runner, approvals, config, copilot } = this.deps;
+    const { tasks, projects, queue, config, copilot } = this.deps;
 
     this.bot.command('start', (ctx) => ctx.reply(HELP_TEXT));
     this.bot.command('help', (ctx) => ctx.reply(HELP_TEXT));
@@ -360,7 +355,7 @@ export class TelegramBot implements Notifier {
 
     this.bot.command('status', async (ctx) => {
       const active = queue.activeIds();
-      const queued = tasks.listByStatus('QUEUED').length;
+      const queuedTasks = tasks.queuedInOrder();
       const waiting = tasks.listByStatus('WAITING_APPROVAL').length;
       const selection = selectModel(config.copilot.model, config.copilot.modelFallback, copilot.models);
       const dailyUsed = tasks.creditsUsedSince(24 * 60 * 60 * 1000);
@@ -375,8 +370,8 @@ export class TelegramBot implements Notifier {
         `Model: ${selection.model}${selection.fellBack ? ` (fallback from ${selection.requested})` : ''}`,
         `Sandbox: ${config.copilot.sandbox ? 'on (experimental)' : 'off'}`,
         '',
-        `Running: ${active.length > 0 ? active.map((id) => `#${id}`).join(', ') : 'none'}`,
-        `Queued: ${queued}`,
+        `Current: ${active.length > 0 ? active.map((id) => `#${id}`).join(', ') : 'idle'}`,
+        `Queue: ${queuedTasks.length > 0 ? queuedTasks.map((t) => `#${t.id}`).join(' → ') : 'empty'}`,
         `Awaiting approval: ${waiting}`,
         '',
         `AI credits (24h): ${dailyUsed.toFixed(2)}${config.limits.maxAiCreditsPerDay > 0 ? ` / ${config.limits.maxAiCreditsPerDay}` : ''}`,
@@ -431,59 +426,15 @@ export class TelegramBot implements Notifier {
     this.bot.command('cancel', async (ctx) => {
       const id = Number.parseInt(ctx.match ?? '', 10);
       if (Number.isNaN(id)) return void (await ctx.reply('Usage: /cancel <task id>'));
-      const task = tasks.get(id);
-      if (!task) return void (await ctx.reply(`Task #${id} not found.`));
-      if (isTerminal(task.status)) return void (await ctx.reply(`Task #${id} already finished (${task.status}).`));
-
-      if (runner.isRunning(id)) {
-        runner.cancel(id);
-        await ctx.reply(`🚫 Cancelling task #${id}…`);
-        return;
-      }
-
-      // Not running: it may be queued, or parked on a pre-execution approval.
-      approvals.resolve(id, 'REJECTED', ctx.from?.id);
-      const latest = tasks.get(id);
-      if (latest && !isTerminal(latest.status)) {
-        tasks.transition(id, 'CANCELLED', { error: 'Cancelled by operator before execution.' });
-      }
-      await ctx.reply(`🚫 Task #${id} cancelled.`);
+      const result = this.deps.service.cancel(id, ctx.from?.id);
+      await ctx.reply(result.ok ? `🚫 ${result.message}` : result.error);
     });
 
     this.bot.command('retry', async (ctx) => {
       const id = Number.parseInt(ctx.match ?? '', 10);
       if (Number.isNaN(id)) return void (await ctx.reply('Usage: /retry <task id>'));
-      const task = tasks.get(id);
-      if (!task) return void (await ctx.reply(`Task #${id} not found.`));
-      if (!isTerminal(task.status)) return void (await ctx.reply(`Task #${id} is still ${task.status}.`));
-
-      projects.load();
-      const project = projects.getById(task.projectId);
-      if (!project) return void (await ctx.reply('That project is no longer registered.'));
-
-      // Re-assess: a retry must not launder a previously rejected or
-      // risk-flagged prompt past the approval gate.
-      const risk = assessRisk(task.prompt);
-      const needsApproval = config.safety.requireApprovalForDangerousActions && risk.level === 'elevated';
-
-      const created = tasks.create({
-        userId: task.userId,
-        chatId: task.chatId,
-        projectId: task.projectId,
-        prompt: task.prompt,
-        approvalRequired: needsApproval,
-        approvalReason: risk.reason,
-      });
-      tasks.addEvent(created.id, 'retry', `Re-queued from task #${id}`);
-
-      if (needsApproval) {
-        await ctx.reply(`🔁 Re-queued as task #${created.id} — approval still required.`);
-        void this.awaitTaskApproval(created.id, task.chatId, project.name, risk.reason, task.prompt);
-        return;
-      }
-
-      queue.kick();
-      await ctx.reply(`🔁 Re-queued as task #${created.id}.`);
+      const result = this.deps.service.retry(id);
+      await ctx.reply(result.ok ? `🔁 ${result.message}` : result.error);
     });
 
     this.bot.command('approve', async (ctx) => this.decide(ctx.match ?? '', 'APPROVED', ctx));
@@ -594,105 +545,21 @@ export class TelegramBot implements Notifier {
     projectId: string,
     prompt: string,
   ): Promise<void> {
-    const { tasks, config, queue, projects } = this.deps;
-
-    if (prompt.length > MAX_PROMPT_LENGTH) {
-      return void (await ctx.reply(`That task description is too long (max ${MAX_PROMPT_LENGTH} characters).`));
-    }
-    const project = projects.getById(projectId);
-    if (!project) return void (await ctx.reply('That project is no longer registered.'));
-
-    // A runaway client (or a fat-fingered burst) must not be able to fill the
-    // queue and the database.
-    const queued = tasks.listByStatus('QUEUED').length + tasks.listByStatus('WAITING_APPROVAL').length;
-    if (queued >= MAX_QUEUED_TASKS) {
-      return void (await ctx.reply(
-        `There are already ${queued} tasks waiting. Let them finish, or cancel some with /cancel <id>.`,
-      ));
-    }
-
-    const risk = assessRisk(prompt);
-    const needsApproval = config.safety.requireApprovalForDangerousActions && risk.level === 'elevated';
-
-    const task = tasks.create({
+    const project = this.deps.projects.getById(projectId);
+    const result = this.deps.service.submit({
+      origin: 'telegram',
       userId: ctx.from?.id ?? 0,
       chatId: ctx.chat.id,
       projectId,
       prompt,
-      approvalRequired: needsApproval,
-      approvalReason: risk.reason,
     });
 
-    if (needsApproval) {
-      await ctx.reply(`Task #${task.id} queued for ${project.name} — approval required.`);
-      // Fire-and-forget: grammY handles updates sequentially, so awaiting the
-      // decision here would block the callback_query that delivers it.
-      void this.awaitTaskApproval(task.id, ctx.chat.id, project.name, risk.reason, prompt);
-      return;
-    }
-
-    await ctx.reply(`✅ Task #${task.id} queued for ${project.name}.`);
-    queue.kick();
-  }
-
-  /** Runs detached from the update loop. Never throws into a handler. */
-  private async awaitTaskApproval(
-    taskId: number,
-    chatId: number,
-    projectName: string,
-    reason: string | null,
-    prompt: string,
-  ): Promise<void> {
-    const flow = this.runApprovalFlow(taskId, chatId, projectName, reason, prompt);
-    this.pendingApprovalFlows.add(flow);
-    try {
-      await flow;
-    } finally {
-      this.pendingApprovalFlows.delete(flow);
-    }
-  }
-
-  private async runApprovalFlow(
-    taskId: number,
-    chatId: number,
-    projectName: string,
-    reason: string | null,
-    prompt: string,
-  ): Promise<void> {
-    const { tasks, queue } = this.deps;
-    try {
-      const outcome = await this.deps.approvals.request({
-        taskId,
-        chatId,
-        title: 'Potentially sensitive task',
-        project: projectName,
-        reason: reason ?? 'Flagged by the risk classifier',
-        details: [`Request: ${truncate(prompt, 300)}`],
-      });
-
-      const current = tasks.get(taskId);
-      if (!current || isTerminal(current.status)) return;
-
-      if (outcome !== 'APPROVED') {
-        tasks.transition(taskId, 'CANCELLED', {
-          error: outcome === 'REJECTED' ? 'Rejected by operator.' : 'Approval expired.',
-        });
-        await this.sendMessage(chatId, `🚫 Task #${taskId} ${outcome.toLowerCase()} — nothing was executed.`);
-        return;
-      }
-
-      tasks.transition(taskId, 'QUEUED');
-      queue.kick();
-    } catch (err) {
-      log.error('Approval flow failed', { taskId, error: errorMessage(err) });
-      try {
-        const current = tasks.get(taskId);
-        if (current && !isTerminal(current.status)) {
-          tasks.transition(taskId, 'FAILED', { error: 'Approval flow failed.' });
-        }
-      } catch {
-        // Nothing further we can do.
-      }
-    }
+    if (!result.ok) return void (await ctx.reply(result.error));
+    const name = project?.name ?? projectId;
+    await ctx.reply(
+      result.awaitingApproval
+        ? `Task #${result.task.id} queued for ${name} — approval required.`
+        : `✅ Task #${result.task.id} queued for ${name}.`,
+    );
   }
 }

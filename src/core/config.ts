@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { registerSecret } from './redact.js';
 import type { LogLevel } from './logger.js';
+import { isProviderId, PROVIDER_IDS, type ProviderId } from '../providers/types.js';
 
 /** Repository root (this file lives at <root>/dist/src/core or <root>/src/core). */
 export const PROJECT_ROOT = (() => {
@@ -19,6 +20,8 @@ export interface AppConfig {
     authorizedUserIds: number[];
     polling: boolean;
   };
+  /** Which agent CLI drives the work. Validated against the provider registry. */
+  provider: ProviderId;
   copilot: {
     bin: string | null;
     model: string;
@@ -77,9 +80,17 @@ export interface AppConfig {
     logDirectory: string;
     projectsFile: string;
   };
-  dashboard: {
-    enabled: boolean;
+  /** Each interface is an optional client of the same core. */
+  interfaces: {
+    telegram: boolean;
+    web: boolean;
+  };
+  web: {
+    host: string;
     port: number;
+    sessionTtlMs: number;
+    /** Password hash file; created by `remote-agent web setup`. */
+    authFile: string;
   };
   logLevel: LogLevel;
 }
@@ -155,8 +166,17 @@ export function loadConfig(options: LoadOptions = {}): AppConfig {
     return n;
   });
 
-  if (requireTelegram) {
-    if (!botToken) throw new ConfigError('TELEGRAM_BOT_TOKEN is not set. Copy .env.example to .env and fill it in.');
+  const telegramEnabled = bool('TELEGRAM_ENABLED', botToken !== '');
+  const webEnabled = bool('WEB_ENABLED', false);
+
+  // Credentials are demanded only for the interface the operator turned on. A
+  // web-only install must never be forced to create a Telegram bot.
+  if (requireTelegram && telegramEnabled) {
+    if (!botToken) {
+      throw new ConfigError(
+        'TELEGRAM_ENABLED is on but TELEGRAM_BOT_TOKEN is not set. Fill it in, or set TELEGRAM_ENABLED=false.',
+      );
+    }
     if (authorizedUserIds.length === 0) {
       throw new ConfigError(
         'AUTHORIZED_TELEGRAM_USER_ID is not set. Without it the bot would accept commands from anybody — refusing to start.',
@@ -187,12 +207,20 @@ export function loadConfig(options: LoadOptions = {}): AppConfig {
     throw new ConfigError('LOG_LEVEL must be one of debug, info, warn, error');
   }
 
+  // An unrecognised provider must stop startup rather than silently fall back
+  // to Copilot: the operator would believe a different CLI was in use.
+  const provider = env('AGENT_PROVIDER') ?? 'copilot';
+  if (!isProviderId(provider)) {
+    throw new ConfigError(`AGENT_PROVIDER must be one of ${PROVIDER_IDS.join(', ')}; got "${provider}"`);
+  }
+
   return {
     telegram: {
       botToken,
       authorizedUserIds,
       polling: bool('TELEGRAM_POLLING', true),
     },
+    provider,
     copilot: {
       bin: env('COPILOT_BIN') ?? null,
       model: env('COPILOT_MODEL') ?? 'claude-opus-5',
@@ -249,9 +277,17 @@ export function loadConfig(options: LoadOptions = {}): AppConfig {
       logDirectory: path.join(workspace, 'logs'),
       projectsFile,
     },
-    dashboard: {
-      enabled: bool('DASHBOARD_ENABLED', false),
-      port: int('DASHBOARD_PORT', 8787, { min: 1024, max: 65535 }),
+    interfaces: {
+      telegram: telegramEnabled,
+      web: webEnabled,
+    },
+    web: {
+      // Localhost by default. Exposing this any wider is an explicit decision
+      // documented under "Remote access", never an accident of installation.
+      host: env('WEB_HOST') ?? '127.0.0.1',
+      port: int('WEB_PORT', 8787, { min: 1024, max: 65535 }),
+      sessionTtlMs: int('WEB_SESSION_TTL_HOURS', 24 * 7, { min: 1, max: 24 * 90 }) * 60 * 60 * 1000,
+      authFile: path.join(workspace, 'web-auth.json'),
     },
     logLevel,
   };

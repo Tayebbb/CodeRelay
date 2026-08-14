@@ -19,4 +19,6 @@ copilot-session-*.md
 
 # Throwaway repos created by scripts/live-acceptance.mjs (spends real credits)
 .live-acceptance-*/
+# Scratch workspaces for manual web-UI testing
+.web-demo/
 .scratch-perm/

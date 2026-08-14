@@ -75,6 +75,20 @@ const MIGRATIONS: Array<{ id: number; sql: string }> = [
       CREATE INDEX IF NOT EXISTS idx_outbox_ts ON outbox(ts);
     `,
   },
+  {
+    id: 3,
+    sql: `
+      ALTER TABLE tasks ADD COLUMN origin TEXT NOT NULL DEFAULT 'telegram';
+      ALTER TABLE tasks ADD COLUMN model TEXT;
+    `,
+  },
+  {
+    id: 4,
+    sql: `
+      ALTER TABLE tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;
+      CREATE INDEX IF NOT EXISTS idx_tasks_queue ON tasks(status, priority DESC, id ASC);
+    `,
+  },
 ];
 
 export class DatabaseCorruptError extends Error {}

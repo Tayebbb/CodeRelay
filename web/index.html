@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
+  <meta name="color-scheme" content="dark light" />
+  <meta name="theme-color" content="#0b0b0e" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="CodeRelay" />
+  <title>CodeRelay</title>
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="stylesheet" href="/style.css" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="/icons/icon-180.png" />
+</head>
+<body>
+  <!-- SVG icon set: vector-only, one stroke weight, themable via currentColor -->
+  <svg width="0" height="0" class="svg-defs" aria-hidden="true">
+    <defs>
+      <symbol id="i-send" viewBox="0 0 24 24"><path d="M12 19V5m0 0l-6 6m6-6l6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="i-stop" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor"/></symbol>
+      <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+      <symbol id="i-collapse" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6L17 7M7 17l-1.4 1.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+      <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 13.5A8 8 0 0 1 10.5 4 8 8 0 1 0 20 13.5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
+      <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M5 15V6a2 2 0 0 1 2-2h9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="i-relay" viewBox="0 0 24 24"><path d="M8 7l-4 5 4 5M16 7l4 5-4 5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/><path d="M13.5 5l-3 14" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></symbol>
+    </defs>
+  </svg>
+
+  <!-- Login -->
+  <div id="login-view" class="login-view hidden">
+    <form id="login-form" class="login-card glass">
+      <div class="brand-mark" aria-hidden="true"><svg class="icon icon-xl"><use href="#i-relay"/></svg></div>
+      <h1>CodeRelay</h1>
+      <p class="login-sub">Your coding agent at home. You, anywhere.</p>
+      <input id="login-password" type="password" placeholder="Password" autocomplete="current-password" required />
+      <button type="submit" id="login-button" class="primary-button">Sign in</button>
+      <p id="login-error" class="login-error" role="alert"></p>
+    </form>
+  </div>
+
+  <!-- App -->
+  <div id="app-view" class="app hidden">
+    <header class="topbar glass">
+      <button id="menu-button" class="icon-button mobile-only" aria-label="Open navigation">
+        <svg class="icon"><use href="#i-menu"/></svg>
+      </button>
+      <button id="sidebar-toggle" class="icon-button desktop-only" aria-label="Collapse sidebar">
+        <svg class="icon"><use href="#i-collapse"/></svg>
+      </button>
+      <div class="brand">
+        <svg class="icon brand-icon" aria-hidden="true"><use href="#i-relay"/></svg>
+        <span>CodeRelay</span>
+      </div>
+      <span id="topbar-project" class="topbar-project"></span>
+      <div class="top-status" role="status">
+        <span id="conn-dot" class="dot dot-ok" aria-hidden="true"></span>
+        <span id="conn-text">Connected</span>
+      </div>
+      <button id="theme-button" class="icon-button" aria-label="Switch theme">
+        <svg class="icon theme-sun"><use href="#i-sun"/></svg>
+        <svg class="icon theme-moon"><use href="#i-moon"/></svg>
+      </button>
+      <button id="logout-button" class="ghost-button">Sign out</button>
+    </header>
+
+    <div class="body">
+      <nav id="sidebar" class="sidebar glass" aria-label="Workspace">
+        <div id="pwa-area"></div>
+        <section class="side-section">
+          <h2>Workspace</h2>
+          <ul id="project-list" class="project-list"></ul>
+        </section>
+        <section class="side-section hidden" id="queue-section">
+          <h2>Up next</h2>
+          <ol id="queue-list" class="queue-list"></ol>
+        </section>
+        <section class="side-section grow">
+          <h2>Tasks</h2>
+          <ul id="task-list" class="task-list"></ul>
+        </section>
+        <section class="side-section side-usage">
+          <div id="usage-line" class="usage-line"></div>
+        </section>
+      </nav>
+      <div id="scrim" class="scrim hidden"></div>
+
+      <main class="main">
+        <div id="task-header" class="task-header hidden">
+          <div class="task-title">
+            <span id="task-id-label"></span>
+            <span id="task-status-pill" class="pill"></span>
+          </div>
+          <div class="tabs" role="tablist">
+            <button class="tab active" data-tab="chat" role="tab">Chat</button>
+            <button class="tab" data-tab="changes" role="tab">Changes</button>
+            <button class="tab" data-tab="tests" role="tab">Tests</button>
+            <button class="tab" data-tab="timeline" role="tab">Timeline</button>
+          </div>
+          <div class="task-actions">
+            <button id="promote-button" class="ghost-button hidden">Move up</button>
+            <button id="retry-button" class="ghost-button hidden">Retry</button>
+            <button id="cancel-button" class="ghost-button danger hidden">Cancel</button>
+          </div>
+        </div>
+
+        <div id="stream" class="stream" aria-live="polite">
+          <div id="empty-state" class="empty-state">
+            <div class="empty-mark" aria-hidden="true"><svg class="icon icon-xl"><use href="#i-relay"/></svg></div>
+            <h2>What should your agent work on?</h2>
+            <p>Pick a project, describe the change, and watch it happen — from anywhere.</p>
+          </div>
+        </div>
+
+        <div id="approval-area"></div>
+
+        <footer class="composer-wrap">
+          <div class="composer glass">
+            <textarea id="prompt-input" rows="1" placeholder="Describe a coding task…" maxlength="4000" aria-label="Task description"></textarea>
+            <div class="composer-bar">
+              <select id="project-select" class="chip-select" aria-label="Project"></select>
+              <select id="model-select" class="chip-select" aria-label="Model"></select>
+              <div id="mode-control" class="segmented" role="radiogroup" aria-label="Mode">
+                <button type="button" data-mode="code" class="seg active" role="radio" aria-checked="true">Code</button>
+                <button type="button" data-mode="plan" class="seg" role="radio" aria-checked="false">Plan</button>
+                <button type="button" data-mode="review" class="seg" role="radio" aria-checked="false">Review</button>
+                <button type="button" data-mode="debug" class="seg" role="radio" aria-checked="false">Debug</button>
+                <button type="button" data-mode="ask" class="seg" role="radio" aria-checked="false">Ask</button>
+              </div>
+              <button id="send-button" class="send-button" aria-label="Send">
+                <svg class="icon send-icon"><use href="#i-send"/></svg>
+                <svg class="icon stop-icon"><use href="#i-stop"/></svg>
+              </button>
+            </div>
+          </div>
+          <div id="composer-note" class="composer-note" role="status"></div>
+        </footer>
+      </main>
+    </div>
+  </div>
+
+  <template id="approval-template">
+    <div class="approval-card" role="alertdialog" aria-label="Approval required">
+      <div class="approval-head">Approval required</div>
+      <div class="approval-body"></div>
+      <div class="approval-buttons">
+        <button class="approve">Approve</button>
+        <button class="reject">Reject</button>
+      </div>
+    </div>
+  </template>
+
+  <script src="/app.js"></script>
+</body>
+</html>

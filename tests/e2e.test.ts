@@ -399,7 +399,12 @@ describe('end-to-end task execution', () => {
     tasks.claimNextQueued(process.pid);
 
     const pending = runner.run(task);
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    // Bounded poll, not a fixed sleep: preflight spawns several git processes
+    // whose latency varies on Windows. The behavioural claim is "the approval
+    // arrives", not "it arrives within 250ms".
+    for (let waited = 0; approvalRequests.length === 0 && waited < 5_000; waited += 50) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
     assert.equal(approvalRequests.length, 1);
     assert.ok(approvalRequests[0]!.reason.includes('uncommitted'));
     approvals.resolve(task.id, 'REJECTED');

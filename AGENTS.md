@@ -11,7 +11,7 @@ Single user, self-hosted, zero recurring infrastructure cost.
   `process.loadEnvFile`) over packages.
 - **Never invent CLI flags, and never trust yesterday's answer.** The Copilot CLI
   auto-updates and its flags and model catalogue change. Verify against the
-  *installed* CLI (`copilot --help`, `help permissions`, `help config`,
+  _installed_ CLI (`copilot --help`, `help permissions`, `help config`,
   `help sandbox`, `help limits`). Appending `--agent __nope__` to a full argv is
   a zero-cost way to check that every other flag parses.
 - **Never weaken the security model.** `--yolo`, `--allow-all`,
@@ -28,6 +28,15 @@ Single user, self-hosted, zero recurring infrastructure cost.
 - **Advisory roles must be read-only at the tool level.** The explorer and
   reviewer get `--deny-tool=write`; their safety must not depend on the prompt
   being obeyed.
+- **A provider must never silently lower the bar.** The deny-list is written in
+  each CLI's own flag language, so a provider that cannot express "deny
+  shell(curl)" would void a protection the README still promises. Every provider
+  DECLARES its capabilities, `REQUIRED_CAPABILITIES` are mandatory, and
+  `selectProvider()` refuses rather than degrades. Declare a capability only when
+  a real, verified flag on the _installed_ CLI implements it.
+- **"Zero recurring cost" is per-provider.** It is true of Copilot because the
+  subscription already exists. Any other provider bills separately and must say
+  so in `billing`, which `doctor` prints.
 - **Anything that runs project-supplied code gets `buildChildEnv()`,** never
   `process.env`. `execCommand`'s `env` REPLACES the environment; a hostile
   `"test"` script must not be able to read the bot token.
@@ -44,6 +53,16 @@ Single user, self-hosted, zero recurring infrastructure cost.
 - **Never block a Telegram handler on something another update must resolve.**
   grammY processes updates strictly sequentially, so awaiting an approval inside
   a handler deadlocks the entire bot.
+- **Interfaces are thin clients.** Telegram and the web UI submit, cancel,
+  retry and approve ONLY through `TaskService`/`ApprovalService`, and observe
+  ONLY through the repository and the `EventBus`. A queue cap, risk gate or
+  approval check implemented inside one interface is a bug even when it works:
+  it is where the interfaces start to disagree. Each interface must be fully
+  optional; the core runs with either or both.
+- **The web surface trusts nothing.** All DOM insertion via `textContent`, CSP
+  with no inline script, mutations require the `X-CodeRelay` header plus
+  same-origin `Origin`, static serving only from `web/` with an extension
+  allow-list. The browser gets project metadata, never filesystem paths.
 
 ## Commands
 
@@ -72,10 +91,10 @@ this is the only thing that can.
 - Tests use `node:test` + `node:assert/strict`. No test framework dependency.
 - Untrusted text (anything from Telegram) is passed as an `argv` element with
   `shell: false`. On Windows, `shell: true` routes through `cmdExeInvocation`,
-  which quotes every token that *needs* quoting — never hand a raw string to
+  which quotes every token that _needs_ quoting — never hand a raw string to
   `spawn(shell: true)`. **Do not quote a bare program name.** `cmd /c ""npm"
-  "test""` sets `%0` to a quoted bare name, so `%~dp0` inside `npm.cmd` expands
-  to the *current directory*; npm then dies looking for
+"test""` sets `%0` to a quoted bare name, so `%~dp0` inside `npm.cmd` expands
+  to the _current directory_; npm then dies looking for
   `<cwd>\node_modules\npm\bin\npm-prefix.js`. That made every verification using
   npm/yarn/pnpm/gradlew fail and silently threw away correct work.
 - **The model catalogue is not an entitlement.** `--help` can list a model that
@@ -87,7 +106,7 @@ this is the only thing that can.
   injection when echoing code and paths.
 - Long-running child processes must be killed with `killProcessTree` and backed
   by a watchdog: `close` does not fire while a grandchild holds a stdio pipe.
-- Comments explain *why*, not *what*. One line where one line will do.
+- Comments explain _why_, not _what_. One line where one line will do.
 
 ## Testing changes
 

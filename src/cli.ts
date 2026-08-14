@@ -12,6 +12,7 @@ import { formatDoctorReport, runDoctor } from './health/doctor.js';
 import { formatDuration } from './telegram/format.js';
 import { isProcessAlive, main, readPidFile } from './main.js';
 import { statusEmoji } from './domain/task.js';
+import { createPasswordFile, passwordFileExists } from './web/auth.js';
 
 const USAGE = `
 remote-agent — control the home-PC coding agent
@@ -32,6 +33,8 @@ remote-agent — control the home-PC coding agent
   remote-agent tasks [n]             Recent tasks
   remote-agent logs <id>             Event log for a task
   remote-agent test                  Self-test: config, db, registry, detection (no AI calls)
+
+  remote-agent web setup             Create (or replace) the web interface password
 `;
 
 function config(requireTelegram = false) {
@@ -309,6 +312,69 @@ async function cmdSelfTest(): Promise<number> {
   return failures === 0 ? 0 : 1;
 }
 
+/** Read a line from the terminal without echoing it (passwords). */
+function readHidden(promptText: string): Promise<string> {
+  return new Promise((resolve) => {
+    process.stdout.write(promptText);
+    const stdin = process.stdin;
+    const wasRaw = stdin.isTTY ? stdin.isRaw : false;
+    if (stdin.isTTY) stdin.setRawMode(true);
+    stdin.resume();
+
+    let value = '';
+    const onData = (chunk: Buffer) => {
+      for (const char of chunk.toString('utf8')) {
+        if (char === '\r' || char === '\n') {
+          stdin.off('data', onData);
+          if (stdin.isTTY) stdin.setRawMode(wasRaw);
+          stdin.pause();
+          process.stdout.write('\n');
+          resolve(value);
+          return;
+        }
+        if (char === '\u0003') {
+          // Ctrl+C
+          process.stdout.write('\n');
+          process.exit(130);
+        }
+        if (char === '\u0008' || char === '\u007f') {
+          value = value.slice(0, -1);
+          continue;
+        }
+        value += char;
+      }
+    };
+    stdin.on('data', onData);
+  });
+}
+
+async function cmdWeb(args: string[]): Promise<number> {
+  if (args[0] !== 'setup') {
+    console.error('Usage: remote-agent web setup');
+    return 1;
+  }
+  const cfg = config(false);
+  if (passwordFileExists(cfg.web.authFile)) {
+    console.log('A web password already exists. Continuing will REPLACE it and sign out every session.');
+  }
+
+  const password = await readHidden('New web password (min 8 characters): ');
+  if (password.length < 8) {
+    console.error('Too short. The password must be at least 8 characters.');
+    return 1;
+  }
+  const confirmed = await readHidden('Repeat it: ');
+  if (password !== confirmed) {
+    console.error('The passwords do not match. Nothing was changed.');
+    return 1;
+  }
+
+  createPasswordFile(cfg.web.authFile, password);
+  console.log(`\nWeb password saved to ${cfg.web.authFile}`);
+  console.log('Enable the interface with WEB_ENABLED=true in .env, then start the agent.');
+  return 0;
+}
+
 export async function runCli(argv: string[]): Promise<number> {
   const [command, ...args] = argv;
 
@@ -357,6 +423,8 @@ export async function runCli(argv: string[]): Promise<number> {
         return cmdLogs(args);
       case 'test':
         return await cmdSelfTest();
+      case 'web':
+        return await cmdWeb(args);
       default:
         console.error(`Unknown command "${command}".\n${USAGE}`);
         return 1;

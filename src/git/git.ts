@@ -177,6 +177,16 @@ export class Git {
     });
   }
 
+  /** Full patch for one commit, for display. Null when git refuses. */
+  async showCommit(hash: string, maxBytes = 200_000): Promise<string | null> {
+    // The hash comes from our own database (recorded at commit time), but a
+    // strict format check costs nothing and removes any option-injection shape.
+    if (!/^[0-9a-f]{7,40}$/i.test(hash)) return null;
+    const result = await this.run(['show', '--no-color', '--stat', '--patch', hash, '--']);
+    if (result.code !== 0) return null;
+    return result.stdout.length > maxBytes ? result.stdout.slice(0, maxBytes) + '\n… (truncated)' : result.stdout;
+  }
+
   async isRepository(): Promise<boolean> {
     if (!fs.existsSync(path.join(this.cwd, '.git'))) {
       const result = await this.run(['rev-parse', '--is-inside-work-tree']);

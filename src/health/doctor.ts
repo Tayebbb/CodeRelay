@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execCommand } from '../util/exec.js';
 import { detectCopilot, selectModel, type CopilotInfo } from '../copilot/detect.js';
+import { describeCapabilityGaps, missingCapabilities, selectProvider } from '../providers/index.js';
 import { AGENT_NAME, agentTargetPath, isAgentInstalled } from '../copilot/agentInstall.js';
 import { ProjectRegistry } from '../projects/registry.js';
 import { Git } from '../git/git.js';
@@ -242,6 +243,53 @@ export async function runDoctor(): Promise<DoctorReport> {
   }
 
   const copilot = await detectCopilot(config?.copilot.bin ?? null);
+
+  // Report the selected provider, its capability gaps and how it is billed.
+  // "Zero additional cost" is only true for Copilot, so the operator must see
+  // which CLI they have chosen before it starts spending.
+  if (config) {
+    const provider = selectProvider(config.provider);
+    const gaps = missingCapabilities(provider);
+    results.push(
+      gaps.length === 0
+        ? { name: 'Agent provider', status: 'pass', detail: `${provider.displayName} — billed to ${provider.billing}` }
+        : {
+            name: 'Agent provider',
+            status: 'fail',
+            detail: `${provider.displayName} cannot enforce:\n${describeCapabilityGaps(gaps)}`,
+            hint: 'Choose a provider that supports the full safety model.',
+          },
+    );
+
+    if (!provider.capabilities.allowUrlsByDomain) {
+      results.push({
+        name: 'Network restriction',
+        status: 'warn',
+        detail: `${provider.displayName} cannot allow-list URLs by domain; network tools are denied wholesale instead`,
+      });
+    }
+
+    if (config.provider !== 'copilot') {
+      const info = await provider.detect(null);
+      results.push(
+        info.installed
+          ? { name: `${provider.displayName} CLI`, status: 'pass', detail: info.version ?? 'installed' }
+          : {
+              name: `${provider.displayName} CLI`,
+              status: 'fail',
+              detail: info.error ?? 'not found',
+            },
+      );
+      if (info.launcher && !info.launcher.safe) {
+        results.push({
+          name: `${provider.displayName} launch safety`,
+          status: 'fail',
+          detail: 'Resolved to a shell shim; prompt text would pass through a shell',
+        });
+      }
+    }
+  }
+
   results.push(
     copilot.installed
       ? { name: 'Copilot CLI', status: 'pass', detail: `v${copilot.version} · ${copilot.launcher?.description ?? ''}` }

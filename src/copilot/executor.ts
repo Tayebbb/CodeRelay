@@ -1,16 +1,25 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import {
-  JsonlStream,
-  mergeUsage,
-  normaliseShutdownUsage,
-  toolRequestName,
-  type CopilotEnvelope,
-  type CopilotUsage,
-} from './events.js';
+import { LineStream, mergeUsage, type CopilotUsage } from './events.js';
 import type { CopilotLauncher } from './detect.js';
 import { redact } from '../core/redact.js';
 import { killProcessTree } from '../util/processTree.js';
 import { buildChildEnv } from './childEnv.js';
+import type { AgentEvent, AgentProvider, AgentUsage } from '../providers/types.js';
+
+/** Translate a provider's normalised usage back into the internal totals. */
+function fromAgentUsage(usage: AgentUsage): CopilotUsage {
+  return {
+    premiumRequests: usage.credits,
+    codeChanges:
+      usage.filesModified || usage.linesAdded !== undefined || usage.linesRemoved !== undefined
+        ? {
+            filesModified: usage.filesModified,
+            linesAdded: usage.linesAdded,
+            linesRemoved: usage.linesRemoved,
+          }
+        : undefined,
+  };
+}
 
 export type ProgressKind =
   | 'session'
@@ -38,9 +47,8 @@ export type StopReason =
   | 'model-unavailable'
   | 'quota-exhausted';
 
-export interface CopilotRunOptions {
-  launcher: CopilotLauncher;
-  cwd: string;
+/** The Copilot-specific inputs that shape the argv. */
+export interface CopilotArgsOptions {
   prompt: string;
   model: string;
   effort: string | null;
@@ -48,27 +56,36 @@ export interface CopilotRunOptions {
   autopilot: boolean;
   maxAutopilotContinues: number;
   permissionArgs: string[];
-  timeoutMs: number;
-  /** Hard ceiling on assistant turns; a runaway loop is stopped locally. */
-  maxTurns: number;
-  /**
-   * Abort when reported AI credits exceed this. Also passed to the CLI as
-   * `--max-ai-credits` when it meets the CLI's documented 30-credit minimum,
-   * which blocks the next model call in-process.
-   */
   creditBudget: number;
   /** Run shell commands inside the CLI's experimental MXC sandbox. */
   sandbox?: boolean;
-  onProgress?: (update: ProgressUpdate) => void;
-  signal?: AbortSignal;
   /** Environment variable names whose values the CLI must strip and redact. */
   secretEnvVars?: string[];
-  /** Extra environment variable names to forward to the child. */
-  envPassthrough?: string[];
   /** Load AGENTS.md and friends from the target repository as instructions. */
   allowRepoInstructions?: boolean;
   /** Keep the built-in GitHub MCP server enabled. */
   githubMcp?: boolean;
+}
+
+export interface CopilotRunOptions {
+  launcher: CopilotLauncher;
+  /** Drives output parsing and failure classification for this session. */
+  provider: AgentProvider;
+  /** The argv, already built by the provider. */
+  args: string[];
+  cwd: string;
+  timeoutMs: number;
+  /** Hard ceiling on assistant turns; a runaway loop is stopped locally. */
+  maxTurns: number;
+  /**
+   * Abort when reported usage exceeds this. The provider also passes its own
+   * in-process ceiling to the CLI where one exists.
+   */
+  creditBudget: number;
+  onProgress?: (update: ProgressUpdate) => void;
+  signal?: AbortSignal;
+  /** Extra environment variable names to forward to the child. */
+  envPassthrough?: string[];
 }
 
 export interface CopilotRunResult {
@@ -111,7 +128,7 @@ const QUOTA_PATTERNS = [
   /insufficient (credits?|quota|balance)/i,
 ];
 
-function looksLikeQuotaProblem(text: string): boolean {
+export function looksLikeQuotaProblem(text: string): boolean {
   return QUOTA_PATTERNS.some((re) => re.test(text));
 }
 
@@ -127,7 +144,7 @@ const AUTH_PATTERNS = [
   /personal access tokens?.*not supported/i,
 ];
 
-function looksLikeAuthProblem(text: string): boolean {
+export function looksLikeAuthProblem(text: string): boolean {
   return AUTH_PATTERNS.some((re) => re.test(text));
 }
 
@@ -145,12 +162,21 @@ const MODEL_PATTERNS = [
   /model .* (is )?(not supported|unsupported)/i,
 ];
 
-function looksLikeModelProblem(text: string): boolean {
+function looksLikeModelProblemInternal(text: string): boolean {
   return MODEL_PATTERNS.some((re) => re.test(text));
 }
 
+/** Exported so the provider layer classifies failures with the same patterns. */
+export const looksLikeModelProblem = looksLikeModelProblemInternal;
+
+/**
+ * The subset of the run options that shapes the argv. Kept separate so the
+ * provider layer can build arguments without inventing a launcher, a working
+ * directory or timeouts it has no business supplying.
+ */
+
 /** Assemble the argv for a non-interactive Copilot run. */
-export function buildCopilotArgs(options: CopilotRunOptions): string[] {
+export function buildCopilotArgs(options: CopilotArgsOptions): string[] {
   const args: string[] = ['-p', options.prompt, '--output-format', 'json', '--no-color'];
 
   args.push('--model', options.model);
@@ -192,12 +218,13 @@ export function buildCopilotArgs(options: CopilotRunOptions): string[] {
   return args;
 }
 
-/** Run one non-interactive Copilot session and stream aggregated progress. */
+/** Run one non-interactive agent session and stream aggregated progress. */
 export function runCopilot(options: CopilotRunOptions): Promise<CopilotRunResult> {
   return new Promise((resolve) => {
-    const args = buildCopilotArgs(options);
+    const provider = options.provider;
+    const args = options.args;
     const transcript: string[] = [];
-    const stream = new JsonlStream();
+    const stream = new LineStream();
 
     let stderr = '';
     let sessionId: string | null = null;
@@ -256,7 +283,7 @@ export function runCopilot(options: CopilotRunOptions): Promise<CopilotRunResult
     const stopWith = (reason: StopReason) => {
       if (settled) return;
       stopReason = reason;
-      progress('limit', `Stopping Copilot: ${reason}`);
+      progress('limit', `Stopping ${provider.displayName}: ${reason}`);
       killTree(child);
       // `close` only fires once every inherited stdio pipe is closed. A
       // surviving grandchild holding stdout would otherwise hang this promise —
@@ -270,71 +297,44 @@ export function runCopilot(options: CopilotRunOptions): Promise<CopilotRunResult
     const onAbort = () => stopWith('cancelled');
     options.signal?.addEventListener('abort', onAbort, { once: true });
 
-    const handleEvent = (event: CopilotEnvelope) => {
-      const data = (event.data ?? {}) as Record<string, unknown>;
-
-      switch (event.type) {
-        case 'session.tools_updated':
-          if (typeof data.model === 'string') progress('session', `Model: ${data.model}`);
+    const handleEvent = (event: AgentEvent) => {
+      switch (event.kind) {
+        case 'session':
+          if (event.text) progress('session', event.text);
           break;
 
-        case 'session.model_change':
-          if (typeof data.newModel === 'string') progress('session', `Model: ${data.newModel}`);
-          break;
-
-        case 'assistant.turn_start':
+        case 'turn-start':
           turns += 1;
           if (turns > options.maxTurns) stopWith('turn-limit');
           break;
 
-        case 'assistant.reasoning': {
-          const content = typeof data.content === 'string' ? data.content : '';
-          if (content) progress('thinking', content.slice(0, 400));
+        case 'thinking':
+          if (event.text) progress('thinking', event.text);
           break;
-        }
 
-        case 'assistant.message': {
-          const content = typeof data.content === 'string' ? data.content : '';
-          if (content.trim()) {
-            finalMessage = content;
-            progress('message', content.slice(0, 1200));
-          }
-          if (typeof data.outputTokens === 'number') outputTokens += data.outputTokens;
-
-          const requests = Array.isArray(data.toolRequests) ? data.toolRequests : [];
-          for (const request of requests) {
-            const name = toolRequestName(request);
-            if (name) progress('tool', name);
+        case 'message':
+          if (event.text.trim()) {
+            finalMessage = event.text;
+            progress('message', event.text.slice(0, 1200));
           }
           break;
-        }
 
-        case 'result': {
-          sessionId = event.sessionId ?? null;
-          usage = mergeUsage(usage, event.usage);
-          sawTerminalEvent = true;
+        case 'tool':
+          if (event.text) progress('tool', event.text);
           break;
-        }
 
-        // Secondary source carrying the same totals. Used when `result` is
-        // absent or incomplete so a CLI change cannot silently zero the budget.
-        case 'session.shutdown': {
-          usage = mergeUsage(usage, normaliseShutdownUsage(data));
-          sawTerminalEvent = true;
+        case 'warning':
+          if (event.text) progress('warning', event.text);
           break;
-        }
 
-        default: {
-          if (event.type.startsWith('tool.') || event.type.startsWith('session.tool')) {
-            const name =
-              (typeof data.name === 'string' && data.name) ||
-              (typeof data.toolName === 'string' && data.toolName) ||
-              event.type;
-            progress('tool', name);
-          }
+        default:
           break;
-        }
       }
+
+      if (typeof event.outputTokens === 'number') outputTokens += event.outputTokens;
+      if (event.sessionId) sessionId = event.sessionId;
+      if (event.usage) usage = mergeUsage(usage, fromAgentUsage(event.usage));
+      if (event.terminal) sawTerminalEvent = true;
 
       const credits = usage.premiumRequests ?? 0;
       if (options.creditBudget > 0 && credits > options.creditBudget) {
@@ -351,7 +351,9 @@ export function runCopilot(options: CopilotRunOptions): Promise<CopilotRunResult
       // One malformed line from the CLI must degrade this task only, never
       // escape as an uncaught exception and restart the whole agent.
       try {
-        for (const event of stream.push(chunk)) handleEvent(event);
+        for (const line of stream.push(chunk)) {
+          for (const event of provider.parseLine(line)) handleEvent(event);
+        }
       } catch (err) {
         stderr = (stderr + `\n[remote-agent] could not parse CLI output: ${String(err)}`).slice(-20_000);
       }
@@ -360,9 +362,9 @@ export function runCopilot(options: CopilotRunOptions): Promise<CopilotRunResult
     child.stderr?.setEncoding('utf8');
     child.stderr?.on('data', (chunk: string) => {
       stderr = (stderr + chunk).slice(-20_000);
-      if (looksLikeQuotaProblem(chunk)) {
+      if (looksLikeQuotaProblem(chunk) || provider.looksLikeQuota(chunk)) {
         quotaHint = true;
-        progress('warning', 'Copilot mentioned a usage/quota condition.');
+        progress('warning', `${provider.displayName} mentioned a usage/quota condition.`);
       }
     });
 
@@ -373,14 +375,17 @@ export function runCopilot(options: CopilotRunOptions): Promise<CopilotRunResult
       if (killWatchdog) clearTimeout(killWatchdog);
       options.signal?.removeEventListener('abort', onAbort);
       try {
-        for (const event of stream.flush()) handleEvent(event);
+        for (const line of stream.flush()) {
+          for (const event of provider.parseLine(line)) handleEvent(event);
+        }
       } catch {
         // A trailing partial line is not worth failing over.
       }
 
       if (abandoned) {
         stderr = (
-          stderr + '\n[remote-agent] Copilot was killed but did not report exit; abandoning the process.'
+          stderr +
+          `\n[remote-agent] ${provider.displayName} was killed but did not report exit; abandoning the process.`
         ).slice(-20_000);
       }
 
@@ -389,11 +394,10 @@ export function runCopilot(options: CopilotRunOptions): Promise<CopilotRunResult
         const diagnostics = stderr + finalMessage;
         // Credentials first: an auth failure is neither a quota problem nor a
         // transient startup error, and retrying it only wastes time.
-        if (looksLikeAuthProblem(diagnostics)) {
-          stopReason = 'auth-error';
-        } else if (looksLikeModelProblem(diagnostics)) {
-          stopReason = 'model-unavailable';
-        } else if (quotaHint || looksLikeQuotaProblem(diagnostics)) {
+        const classified = provider.classifyFailure(diagnostics);
+        if (classified) {
+          stopReason = classified;
+        } else if (quotaHint) {
           stopReason = 'quota-exhausted';
         } else if (!sawTerminalEvent && turns === 0) {
           // Died during argument parsing / model resolution: no JSON at all.

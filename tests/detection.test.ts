@@ -178,13 +178,20 @@ describe('configuration', () => {
 
   const BASE = { TELEGRAM_BOT_TOKEN: '123:abc', AUTHORIZED_TELEGRAM_USER_ID: '4242' };
 
-  test('refuses to start without a bot token', () => {
+  test('a missing bot token disables Telegram rather than crashing', () => {
     withEnv({ ...BASE, TELEGRAM_BOT_TOKEN: undefined }, () => {
+      const config = loadConfig();
+      assert.equal(config.interfaces.telegram, false);
+    });
+  });
+
+  test('explicitly enabling Telegram without a token is refused', () => {
+    withEnv({ ...BASE, TELEGRAM_BOT_TOKEN: undefined, TELEGRAM_ENABLED: 'true' }, () => {
       assert.throws(() => loadConfig(), ConfigError);
     });
   });
 
-  test('refuses to start without an authorized user', () => {
+  test('a token without an allow-list is still refused — never an open bot', () => {
     withEnv({ ...BASE, AUTHORIZED_TELEGRAM_USER_ID: undefined }, () => {
       assert.throws(() => loadConfig(), ConfigError);
     });

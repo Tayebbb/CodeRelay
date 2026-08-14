@@ -1,14 +1,18 @@
-# Remote Personal Coding Agent
+# CodeRelay
 
-Send a coding task from your phone. Your home PC does the work with GitHub Copilot, runs your tests, and reports back.
+Your personal remote coding agent. Send a coding task from your phone — your home PC does the work with GitHub Copilot, runs your tests, and reports back.
 
 ```
-Phone (Telegram)  →  your PC  →  GitHub Copilot CLI  →  your local repo
-       ↑                                                        │
-       └──────────── result, diff, test output ─────────────────┘
+Phone ─┬─ Telegram ──┐
+       │             ├──►  your PC (one core)  ──►  Copilot CLI  ──►  your local repo
+       └─ Browser ───┘             │
+         ▲                          │
+         └── result, diff, tests ◄─┘
 ```
 
-**No server. No hosting. No monthly bill.** It uses the Copilot subscription you already have, connects out to Telegram (so no open ports), and keeps everything in a local SQLite file.
+**Two interfaces, one agent.** Use **Telegram**, the **web UI**, or **both** — they are optional clients of the same core and share the same tasks, approvals, budgets and history. Neither requires the other.
+
+**No server. No hosting. No monthly bill.** It uses the Copilot subscription you already have, connects outward only (no open ports), and keeps everything in a local SQLite file.
 
 ---
 
@@ -18,10 +22,13 @@ Phone (Telegram)  →  your PC  →  GitHub Copilot CLI  →  your local repo
 - [Is this safe? Read this first](#is-this-safe-read-this-first)
 - [Requirements](#requirements)
 - [Install](#install)
+- [Choose your interface](#choose-your-interface)
 - [Add your projects](#add-your-projects)
 - [Run it](#run-it)
 - [Using it from your phone](#using-it-from-your-phone)
+- [The web interface](#the-web-interface)
 - [Safety features](#safety-features)
+- [How it works (technical)](#how-it-works-technical)
 - [Configuration](#configuration)
 - [Troubleshooting](#troubleshooting)
 - [Cost](#cost)
@@ -32,7 +39,7 @@ Phone (Telegram)  →  your PC  →  GitHub Copilot CLI  →  your local repo
 
 ## What it actually does
 
-You text your bot:
+You send a task — from Telegram or from the browser:
 
 ```
 myapp: the /users endpoint returns 500 when the id is missing
@@ -79,7 +86,7 @@ Start with a throwaway repo. Watch a few tasks. Then decide how far to trust it.
 | **Node.js 22.5+**               | Needs the built-in `node:sqlite`. Node 24 recommended            |
 | **Git**                         | Any recent version                                               |
 | **GitHub Copilot subscription** | The AI comes from here. There is no other API key                |
-| **Telegram account**            | Free                                                             |
+| **Telegram account**            | Only for the Telegram interface — free, optional                  |
 
 ---
 
@@ -101,46 +108,37 @@ npm install -g @github/copilot
 copilot login
 ```
 
-### 3. Create your Telegram bot
+### 3. Choose your interface
 
-In Telegram, message **@BotFather** and send:
+You need at least one. You can enable both at any time — they share everything.
 
 ```
-/newbot
+CodeRelay core  ✓ installed
+Agent           ✓ Copilot signed in
+
+Interfaces:            best for:
+  📱 Telegram          quick commands, notifications, status on the go
+  🌐 Web UI            long tasks, model picking, diffs, task history
+  🔀 Both              Telegram for pings, the browser for real work
 ```
 
-Give it a display name, then a username ending in `bot`. BotFather replies with a token like `8123456789:AAH...` — copy it.
+| You want | Do this | Guide |
+| -------- | ------- | ----- |
+| **Telegram only** | Create a bot, put its token and your user id in `.env` | **[docs/setup-telegram.md](docs/setup-telegram.md)** |
+| **Web only** | `npm run agent -- web setup`, then `WEB_ENABLED=true` | **[docs/setup-web.md](docs/setup-web.md)** |
+| **Both** | Do both of the above — no extra wiring | both guides |
 
-### 4. Get your user ID
+You are never asked to configure an interface you don't use: without a bot
+token, Telegram simply stays off; without `WEB_ENABLED=true`, no web server
+runs at all.
 
-In Telegram, message **@userinfobot**. It replies immediately with your numeric `Id`.
-
-### 5. Configure
-
-```powershell
-copy .env.example .env
-```
-
-Open `.env` and fill in exactly two values:
-
-```env
-TELEGRAM_BOT_TOKEN=8123456789:AAH...
-AUTHORIZED_TELEGRAM_USER_ID=123456789
-```
-
-> `.env` is gitignored — never commit it. If the token ever leaks, send `/revoke` to BotFather and generate a new one.
-
-### 6. Check everything
+### 4. Check everything
 
 ```powershell
 npm run doctor
 ```
 
-Verifies Node, git, the Copilot CLI, your login, the model catalogue, your Telegram token, file permissions and every registered project. Fix whatever it flags before going further.
-
-### 7. Say hello to your bot
-
-Find your bot in Telegram by the username you chose and tap **Start**. Telegram won't let a bot message you until you've messaged it first.
+Verifies Node, git, the Copilot CLI, your login, the model catalogue, your interface configuration, file permissions and every registered project. Fix whatever it flags before going further.
 
 ---
 
@@ -213,6 +211,8 @@ The task triggers **at logon**. If Windows reboots while you are away and stops 
 
 ## Using it from your phone
 
+_The Telegram interface. For the browser, see [the web interface](#the-web-interface)._
+
 Send a task:
 
 ```
@@ -263,6 +263,67 @@ npm test                 # confirm it really passes
 
 ---
 
+## The web interface
+
+An IDE-like browser client served by the agent itself — plain HTML/CSS/JS, no
+frontend dependencies, `127.0.0.1` by default. Built mobile-first, because the
+whole point is that you are away from the PC.
+
+```
+┌────────────────────────────────────────────────────────────┐
+│ CodeRelay                                    ● Agent ready │
+├──────────────┬─────────────────────────────────────────────┤
+│ PROJECTS     │  Task #12 · MyApp                    RUNNING │
+│ ● MyApp      │  [Conversation] [Changes] [Timeline]         │
+│ ○ Api        │                                              │
+│              │  You: fix the failing date parser tests      │
+│ TASKS        │  🤖 Agent · claude-opus-5                    │
+│ #12 RUNNING  │     🔒 Checkpoint created                    │
+│ #11 DONE     │     🛠 edit src/parse.ts                     │
+│              │     🧪 Running tests: npm test               │
+├──────────────┴─────────────────────────────────────────────┤
+│ [MyApp ▾] [claude-opus-5 ▾] [Code ▾]  Type a message…  [➤] │
+└────────────────────────────────────────────────────────────┘
+```
+
+- **Model picker** filled from the *installed* CLI's real catalogue — nothing
+  hardcoded, unavailable providers shown but not selectable.
+- **Modes** — Code, Plan, Review, Debug, Ask — shape the task on the server,
+  so both interfaces get identical orchestration.
+- **Live streaming** over Server-Sent Events: progress lines, approval cards
+  and status changes appear without a refresh, and reconnects replay what you
+  missed.
+- **Exact agent output.** The agent's own words — its final message, tool
+  activity and real terminal output — are shown verbatim and visually separate
+  from CodeRelay's own system events. Nothing is paraphrased.
+- **Diff viewer** with per-file collapse and add/remove colouring, redacted by
+  the same machinery as every Telegram message.
+- **Approvals** render as cards with Approve/Reject — answered through the
+  exact same gate as the Telegram buttons, never around it.
+- **Installable (PWA).** Add it to your phone's home screen and it opens as a
+  standalone app, with the shell cached for instant launches. The service
+  worker never touches `/api/` — no task data, git information or session
+  material is ever cached. Light and dark themes, both designed on their own
+  terms.
+
+Setup: **[docs/setup-web.md](docs/setup-web.md)** — including how to reach it
+safely from outside your home (private tunnel or SSH; never an open port).
+
+### Telegram or web?
+
+|  | Telegram | Web |
+| - | -------- | --- |
+| Quick command / status while out | **best** | fine |
+| Push notification when a task finishes | **yes** | no (open page only) |
+| Choosing the model per task | no | **yes** |
+| Reading diffs and code | painful | **good** |
+| Task history browsing | limited | **good** |
+| Long, multi-step work sessions | fine | **best** |
+
+Enable both: task ids, state, budgets, approvals and history are shared,
+because both talk to the same core. A task sent from Telegram appears in the
+web history immediately, and vice versa.
+
 ## Safety features
 
 **Checkpoints.** Before each task a git commit object is written to `refs/remote-agent/checkpoint-<id>`, capturing the tree _including_ your uncommitted work. It never touches your index or working tree.
@@ -282,14 +343,59 @@ git checkout refs/remote-agent/checkpoint-4 -- .   # restore everything
 
 ---
 
+## How it works (technical)
+
+One core, thin clients, and a pluggable agent layer:
+
+```
+ Telegram bot ─┐                        ┌─ provider: Copilot CLI ─┐
+              ├─► TaskService ─► Queue ─► TaskRunner ─► agent CLI  ├─► your repo
+ Web UI (PWA) ─┘        │        │        │          └─ provider: Claude Code ┘
+      ▲                 ▼        ▼        ▼
+      └── EventBus ◄─ TaskRepository (SQLite: tasks, events, usage ledger)
+```
+
+- **One source of truth.** Every task lives in a local SQLite database
+  (`node:sqlite`, no server). Both interfaces submit through the same
+  `TaskService` — the queue cap, risk gate, approval flow and retry rules exist
+  exactly once — and observe through the same `EventBus`.
+- **Persistent FIFO queue.** Tasks are claimed with an atomic compare-and-swap
+  (`UPDATE … WHERE status='QUEUED'`), oldest first, one task per project at a
+  time — enforced in SQL, not in memory. A crash re-queues in-flight work with
+  its spend preserved; three interruptions abandon it rather than re-billing
+  forever.
+- **Provider abstraction.** The agent CLI sits behind an `AgentProvider`
+  interface (argv building, event parsing, failure classification). Every
+  provider declares its capabilities and `selectProvider()` **refuses to run**
+  when a mandatory protection (shell deny-list, write denial, repo-instruction
+  isolation) cannot be expressed in that CLI's flags — no silent downgrades.
+- **Hostile-repository model.** Before any git command runs, the repo's config
+  is fingerprinted for filter/diff drivers and executable hooks; agent, skill,
+  hook and MCP files are scanned before *and re-checked after* every agent
+  session; git runs with an absolute program path, a hardened environment and
+  no repository-supplied hooks. Verification commands execute with an
+  allow-listed environment that never contains the bot token.
+- **Zero runtime dependencies except `grammy`.** The web server is `node:http`
+  with Server-Sent Events (no WebSocket library), the frontend is dependency-
+  free static files under a strict CSP, and the PWA icons are generated by a
+  committed script with a hand-rolled PNG encoder.
+
+For a full architectural tour — module map, data model, event flow, security
+boundaries, test strategy — see **[project-analysis.md](project-analysis.md)**.
+
+---
+
 ## Configuration
 
 Everything lives in `.env`. Only the first two are required.
 
 | Setting                       | Default                          | Meaning                                      |
 | ----------------------------- | -------------------------------- | -------------------------------------------- |
-| `TELEGRAM_BOT_TOKEN`          | —                                | From @BotFather                              |
+| `TELEGRAM_ENABLED`            | on if a token is set             | The Telegram interface                       |
+| `TELEGRAM_BOT_TOKEN`          | —                                | From @BotFather (Telegram only)              |
 | `AUTHORIZED_TELEGRAM_USER_ID` | —                                | Your numeric id; comma-separated for several |
+| `WEB_ENABLED`                 | `false`                          | The browser interface                        |
+| `WEB_HOST` / `WEB_PORT`       | `127.0.0.1` / `8787`             | Where the web UI listens                     |
 | `COPILOT_MODEL`               | `claude-opus-5`                  | List them with `npm run agent -- models`     |
 | `COPILOT_MODEL_FALLBACK`      | `claude-opus-4.8`                | Used if the first is refused at run time     |
 | `COPILOT_SANDBOX`             | `false`                          | `true` gives real containment (experimental) |
@@ -314,8 +420,9 @@ Everything lives in `.env`. Only the first two are required.
 | Symptom                                     | Fix                                                                                                              |
 | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | Bot ignores you                             | Your id isn't in `AUTHORIZED_TELEGRAM_USER_ID` — check with @userinfobot                                         |
-| `TELEGRAM_BOT_TOKEN is not set`             | Fill it into `.env`                                                                                              |
-| `401 Unauthorized` at startup               | Wrong token, or another copy of the bot is already polling                                                       |
+| `No interface is enabled`                   | Enable Telegram (token + id) or the web UI (`WEB_ENABLED=true`), or both                                          |
+| `…has no password yet`                      | `npm run agent -- web setup`                                                                                      |
+| `401 Unauthorized` at startup               | Wrong token, or another copy of the bot is already polling                                                        |
 | `no account is signed in`                   | Run `copilot login`                                                                                              |
 | `Model "X" is not available`                | Usually your Copilot allowance is temporarily spent. It switches model once automatically; otherwise retry later |
 | Task refused: merge conflicts               | Resolve them yourself first                                                                                      |
@@ -352,6 +459,7 @@ A simple bug fix costs roughly **1 AI credit**. Daily and per-task ceilings are 
 4. **The PC must be on, awake and signed in.**
 5. **The model catalogue changes.** The Copilot CLI auto-updates; re-run `npm run agent -- models` afterwards.
 6. **Windows-first.** Startup automation ships for Windows only.
+7. **Known Copilot CLI issue (verified on 1.0.79).** A CLI regression makes any per-path `--deny-tool=write(…)` rule deny **all** file writes, so the agent reports “Blocked — I could not write any files” and completes without changes. The web UI shows the agent's exact words, so this is visible rather than silent. Status on 1.0.80 is unverified. If you hit it: `copilot update`, retry the task, and watch the agent's own report.
 
 ---
 
