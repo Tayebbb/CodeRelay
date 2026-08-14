@@ -324,8 +324,8 @@ async function cmdSelfTest(): Promise<number> {
   return failures === 0 ? 0 : 1;
 }
 
-/** Read a line from the terminal without echoing it (passwords). */
-function readHidden(promptText: string): Promise<string> {
+/** Read a line from the terminal, echoing `*` per key (or plaintext with 'plain'). */
+function readHidden(promptText: string, echo: 'mask' | 'plain' = 'mask'): Promise<string> {
   return new Promise((resolve) => {
     process.stdout.write(promptText);
     const stdin = process.stdin;
@@ -350,10 +350,14 @@ function readHidden(promptText: string): Promise<string> {
           process.exit(130);
         }
         if (char === '\u0008' || char === '\u007f') {
-          value = value.slice(0, -1);
+          if (value.length > 0) {
+            value = value.slice(0, -1);
+            process.stdout.write('\b \b');
+          }
           continue;
         }
         value += char;
+        process.stdout.write(echo === 'plain' ? char : '*');
       }
     };
     stdin.on('data', onData);
@@ -362,7 +366,7 @@ function readHidden(promptText: string): Promise<string> {
 
 async function cmdWeb(args: string[]): Promise<number> {
   if (args[0] !== 'setup') {
-    console.error('Usage: remote-agent web setup');
+    console.error('Usage: remote-agent web setup [--show]');
     return 1;
   }
   const cfg = config(false);
@@ -370,12 +374,15 @@ async function cmdWeb(args: string[]): Promise<number> {
     console.log('A web password already exists. Continuing will REPLACE it and sign out every session.');
   }
 
-  const password = await readHidden('New web password (min 8 characters): ');
+  // --show echoes the password in plaintext for people who type blind badly;
+  // it stays on their own screen and is never logged.
+  const echo = args.includes('--show') ? ('plain' as const) : ('mask' as const);
+  const password = await readHidden('New web password (min 8 characters): ', echo);
   if (password.length < 8) {
     console.error('Too short. The password must be at least 8 characters.');
     return 1;
   }
-  const confirmed = await readHidden('Repeat it: ');
+  const confirmed = await readHidden('Repeat it: ', echo);
   if (password !== confirmed) {
     console.error('The passwords do not match. Nothing was changed.');
     return 1;
