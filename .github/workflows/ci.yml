@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    # Windows only, deliberately: it is the platform every safety property has
+    # been verified on (cmd.exe quoting, CreateProcess CWD search, path
+    # semantics). A green Linux run would imply support this project has not
+    # earned yet.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      # lint (strict tsc) + build + 378 tests. Uses a mock agent CLI — no AI
+      # calls, no credits, no secrets required.
+      - run: npm test

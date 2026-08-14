@@ -14,6 +14,12 @@ Your personal remote coding agent. Send a coding task from your phone — your h
 - **Two ways in.** Telegram bot, an installable web app, or both — same tasks, same history, either one is optional.
 - **Built paranoid.** Your uncommitted work is snapshotted before every task, nothing is pushed without your approval, and secrets never leave the machine.
 
+<p align="center">
+  <img src="docs/assets/web-desktop-dark.png" alt="CodeRelay web interface, dark theme" width="72%" />
+  <img src="docs/assets/web-mobile-dark.png" alt="CodeRelay on a phone" width="20.5%" />
+</p>
+<p align="center"><sub>The web interface — desktop and phone. Light theme included. Every screenshot is the real app.</sub></p>
+
 ## Get started in five minutes
 
 On the PC that has your code (needs [Node 22.5+](https://nodejs.org), git, and a GitHub Copilot subscription):
