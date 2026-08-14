@@ -24,30 +24,88 @@ Your personal remote coding agent. Send a coding task from your phone — your h
 
 ## Get started in five minutes
 
-On the PC that has your code (needs [Node 22.5+](https://nodejs.org), git, and a GitHub Copilot subscription — or Claude Code, see [Configuration](#configuration)):
+You don't need to be a programmer to set this up — every step below is
+copy-paste. You need three things first, each a normal installer:
+
+1. **[Node.js 22.5+](https://nodejs.org)** — the runtime CodeRelay runs on
+2. **[Git](https://git-scm.com/download/win)** — how the code is downloaded and how your work is protected
+3. **A GitHub Copilot subscription** — the AI (Claude Code works too, see [Configuration](#configuration))
+
+Then open **PowerShell** on the PC that has your code and paste, block by block:
+
+**Step 1 — download and build CodeRelay:**
 
 ```powershell
 git clone https://github.com/Tayebbb/Mobile-agent-controller.git
 cd Mobile-agent-controller
 npm install
 npm run build
+```
 
+**Step 2 — connect the AI** (a browser window opens to sign in with GitHub):
+
+```powershell
 npm install -g @github/copilot
-copilot login                        # sign in with your GitHub account
+copilot login
+```
 
-npm run agent -- web setup           # choose a password for the web app
+**Step 3 — create your web password and switch the web app on.** The prompt
+shows a `*` for each key you press; add `--show` at the end if you'd rather
+see the letters:
+
+```powershell
+npm run agent -- web setup
 Add-Content .env "WEB_ENABLED=true"
+```
 
+**Step 4 — tell it where your project lives and how to test it:**
+
+```powershell
 npm run agent -- projects add MyApp "C:\code\myapp" --test "npm test"
+```
+
+**Step 5 — start it:**
+
+```powershell
 npm start
 ```
 
-Open **http://127.0.0.1:8787**, sign in, type a task, watch it happen.
-On your phone, use **Add to Home Screen** and it installs like an app.
+Now open **http://127.0.0.1:8787** in your browser, sign in with the password
+from step 3, type what you want done, and watch it happen live.
+
+**Step 6 (optional but worth it) — make it permanent.** One command makes
+CodeRelay start by itself every time you sign in to Windows, and restart
+itself if it ever crashes:
+
+```powershell
+npm run agent -- startup install
+```
+
+### Reach it from your phone — even from another city
+
+Your PC and phone join a free private network called
+[Tailscale](https://tailscale.com); nothing is exposed to the internet.
+
+```powershell
+winget install --id Tailscale.Tailscale -e   # install on the PC
+tailscale up                                 # a browser opens — sign in
+tailscale ip -4                              # note the 100.x.x.x address it prints
+
+Add-Content .env "WEB_HOST=<the 100.x.x.x address>"
+npm run agent -- stop
+Start-ScheduledTask -TaskName RemotePersonalCodingAgent   # or: npm start
+```
+
+Install the **Tailscale app on your phone**, sign in with the same account,
+switch it on, and open `http://<the 100.x.x.x address>:8787` in your phone's
+browser. Sign in — that's it. Works from home Wi-Fi, mobile data, or the other
+side of the country. (Note: once `WEB_HOST` is set, use that same address in
+the PC's browser too — `127.0.0.1` stops answering, on purpose.)
 
 Prefer chatting with a **Telegram bot** instead (great for notifications on
-the go)? Follow **[docs/setup-telegram.md](docs/setup-telegram.md)** — five
-minutes too. You can enable both; they share everything.
+the go, and it needs no Tailscale at all)? Follow
+**[docs/setup-telegram.md](docs/setup-telegram.md)** — five minutes too. You
+can enable both; they share everything.
 
 That's the whole product. Everything below is detail: the safety model
 (**worth reading before you point this at anything important**), every
@@ -434,8 +492,9 @@ Everything lives in `.env`. Only the first two are required.
 | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | Bot ignores you                             | Your id isn't in `AUTHORIZED_TELEGRAM_USER_ID` — check with @userinfobot                                         |
 | `No interface is enabled`                   | Enable Telegram (token + id) or the web UI (`WEB_ENABLED=true`), or both                                         |
-| `…has no password yet`                      | `npm run agent -- web setup`                                                                                     |
-| `401 Unauthorized` at startup               | Wrong token, or another copy of the bot is already polling                                                       |
+| `…has no password yet`                      | `npm run agent -- web setup`                                                                                     || Password prompt looks frozen                | It hides your typing behind `*` — or run `npm run agent -- web setup --show` to see the letters                  |
+| Phone can't reach the web page              | Set `WEB_HOST` to the PC's Tailscale address and make sure the phone's Tailscale app is switched on               |
+| `127.0.0.1` refused after setting `WEB_HOST` | Expected — the server now listens on the `WEB_HOST` address only; use that address on the PC too                 || `401 Unauthorized` at startup               | Wrong token, or another copy of the bot is already polling                                                       |
 | `no account is signed in`                   | Run `copilot login`                                                                                              |
 | `Model "X" is not available`                | Usually your Copilot allowance is temporarily spent. It switches model once automatically; otherwise retry later |
 | Task refused: merge conflicts               | Resolve them yourself first                                                                                      |

@@ -107,7 +107,6 @@ button { font: inherit; cursor: pointer; color: inherit; background: none; borde
 /* Installed as an app: content extends under the iOS status bar
    (black-translucent), so the chrome absorbs the safe areas itself. */
 @media (display-mode: standalone) {
-  .topbar { padding-top: calc(10px + env(safe-area-inset-top)); }
   .sidebar { padding-top: env(safe-area-inset-top); }
 }
 
@@ -183,14 +182,19 @@ button { font: inherit; cursor: pointer; color: inherit; background: none; borde
   align-items: center;
   gap: 10px;
   padding: 10px 16px;
+  /* env() is 0 in a normal browser tab, so this only bites under a
+     translucent status bar — and iOS home-screen apps do not reliably match
+     the standalone media query, so it must be unconditional. */
+  padding-top: calc(10px + env(safe-area-inset-top, 0px));
   border-bottom: 1px solid var(--hairline);
   z-index: 10;
 }
-.brand { display: flex; align-items: center; gap: 8px; font-weight: 650; letter-spacing: -0.01em; }
+.brand { display: flex; align-items: center; gap: 8px; font-weight: 650; letter-spacing: -0.01em; flex-shrink: 0; }
 .brand-icon { color: var(--accent); width: 18px; height: 18px; }
 .topbar-project { color: var(--text-dim); font-size: 13.5px; }
 .topbar-project:not(:empty)::before { content: '·'; margin-right: 10px; color: var(--text-faint); }
-.top-status { display: flex; align-items: center; gap: 7px; margin-left: auto; color: var(--text-dim); font-size: 13px; }
+.top-status { display: flex; align-items: center; gap: 7px; margin-left: auto; color: var(--text-dim); font-size: 13px; min-width: 0; }
+#conn-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; transition: background var(--t-med) var(--ease); }
 .dot-ok { background: var(--ok); }
@@ -219,6 +223,8 @@ button { font: inherit; cursor: pointer; color: inherit; background: none; borde
   color: var(--text-dim);
   padding: 5px 12px;
   font-size: 13px;
+  white-space: nowrap;
+  flex-shrink: 0;
   transition: color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
 }
 .ghost-button:hover { border-color: var(--hairline-strong); color: var(--text); background: var(--surface); }
@@ -638,8 +644,9 @@ button { font: inherit; cursor: pointer; color: inherit; background: none; borde
 @media (max-width: 760px) {
   .mobile-only { display: block; }
   .desktop-only { display: none; }
-  .topbar { padding: 8px 10px; }
+  .topbar { gap: 8px; padding: 8px 10px; padding-top: calc(8px + env(safe-area-inset-top, 0px)); }
   .topbar-project { display: none; }
+  #conn-text { max-width: 28vw; }
   .sidebar {
     position: fixed;
     top: 0; left: 0; bottom: 0;

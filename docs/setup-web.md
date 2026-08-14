@@ -14,6 +14,9 @@ and binds to `127.0.0.1` unless you explicitly say otherwise.
 npm run agent -- web setup
 ```
 
+The prompt shows a `*` per keystroke. Add `--show` to see the characters
+while you type — they stay on your screen and are never logged.
+
 **2. Enable it** in `.env`:
 
 ```env
