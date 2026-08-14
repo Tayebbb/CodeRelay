@@ -333,7 +333,7 @@ are two remote channels, and they are independent — use either or both.
 
 ### Channel 1: Telegram — zero network setup
 
-The bot connects *outward* to Telegram's servers, so it works from anywhere
+The bot connects _outward_ to Telegram's servers, so it works from anywhere
 the moment it's configured — no tunnel, no port, no extra apps. If your only
 need is "send a task from the bus and get the result back", this is the
 simplest possible setup: **[docs/setup-telegram.md](docs/setup-telegram.md)**.
@@ -553,22 +553,22 @@ Everything lives in `.env`. Only the first two are required.
 
 **Run `npm run doctor` first.** It diagnoses nearly everything.
 
-| Symptom                                      | Fix                                                                                                               |
-| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| Bot ignores you                              | Your id isn't in `AUTHORIZED_TELEGRAM_USER_ID` — check with @userinfobot                                          |
-| `No interface is enabled`                    | Enable Telegram (token + id) or the web UI (`WEB_ENABLED=true`), or both                                          |
-| `…has no password yet`                       | `npm run agent -- web setup`                                                                                       |
-| Password prompt looks frozen                 | It hides your typing behind `*` — or run `npm run agent -- web setup --show` to see the letters                   |
-| Phone can't reach the web page               | Set `WEB_HOST` to the PC's Tailscale address and make sure the phone's Tailscale app is switched on               |
-| `127.0.0.1` refused after setting `WEB_HOST` | Expected — the server now listens on the `WEB_HOST` address only; use that address on the PC too                  |
-| `401 Unauthorized` at startup                | Wrong token, or another copy of the bot is already polling                                                         |
-| `no account is signed in`                    | Run `copilot login`                                                                                               |
+| Symptom                                      | Fix                                                                                                                                                                                                                                            |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Bot ignores you                              | Your id isn't in `AUTHORIZED_TELEGRAM_USER_ID` — check with @userinfobot                                                                                                                                                                       |
+| `No interface is enabled`                    | Enable Telegram (token + id) or the web UI (`WEB_ENABLED=true`), or both                                                                                                                                                                       |
+| `…has no password yet`                       | `npm run agent -- web setup`                                                                                                                                                                                                                   |
+| Password prompt looks frozen                 | It hides your typing behind `*` — or run `npm run agent -- web setup --show` to see the letters                                                                                                                                                |
+| Phone can't reach the web page               | Set `WEB_HOST` to the PC's Tailscale address and make sure the phone's Tailscale app is switched on                                                                                                                                            |
+| `127.0.0.1` refused after setting `WEB_HOST` | Expected — the server now listens on the `WEB_HOST` address only; use that address on the PC too                                                                                                                                               |
+| `401 Unauthorized` at startup                | Wrong token, or another copy of the bot is already polling                                                                                                                                                                                     |
+| `no account is signed in`                    | Run `copilot login`                                                                                                                                                                                                                            |
 | `Model "X" is not available`                 | Usually your allowance is temporarily spent — it switches model once automatically. If **every** model is refused (or you see `exceeded your monthly quota` despite having quota), the CLI's sign-in has gone stale: run `copilot login` again |
-| Task refused: merge conflicts                | Resolve them yourself first                                                                                        |
-| Task refused: filter/diff driver             | The repo makes git run commands when reading files. Inspect it before trusting it                                  |
-| `Tests: not run`                             | No test command detected — register with `--test "..."`                                                           |
-| Stuck in `WAITING_APPROVAL`                  | Tap the button, or `/approve <id>`. Expires per `APPROVAL_TIMEOUT_MINUTES`                                         |
-| `Another agent instance is already running`  | `npm run agent -- stop`                                                                                            |
+| Task refused: merge conflicts                | Resolve them yourself first                                                                                                                                                                                                                    |
+| Task refused: filter/diff driver             | The repo makes git run commands when reading files. Inspect it before trusting it                                                                                                                                                              |
+| `Tests: not run`                             | No test command detected — register with `--test "..."`                                                                                                                                                                                        |
+| Stuck in `WAITING_APPROVAL`                  | Tap the button, or `/approve <id>`. Expires per `APPROVAL_TIMEOUT_MINUTES`                                                                                                                                                                     |
+| `Another agent instance is already running`  | `npm run agent -- stop`                                                                                                                                                                                                                        |
 
 Logs: `data/logs/agent-YYYY-MM-DD.log` (JSON lines, redacted).
 Per-task detail: `npm run agent -- logs <id>`.

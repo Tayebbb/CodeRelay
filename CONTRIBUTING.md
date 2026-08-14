@@ -52,7 +52,7 @@ runner, permissions, git handling or process execution.
 - TypeScript, ESM, `NodeNext` resolution — always use `.js` extensions in
   relative imports.
 - Tests use `node:test` + `node:assert/strict`. No test framework dependency.
-- Comments explain *why*, not *what*.
+- Comments explain _why_, not _what_.
 
 ## Reporting security issues
 
