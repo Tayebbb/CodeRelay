@@ -12,11 +12,13 @@ $nodeExe = (Get-Command node -ErrorAction Stop).Source
 $entry = Join-Path $root 'dist\src\main.js'
 
 if (-not (Test-Path $entry)) {
-    Write-Error "Not built yet. Run `npm install` and `npm run build` in $root first."
+    # Backtick is the PowerShell escape character, so a markdown-style quoted
+    # command inside a double-quoted string breaks the parse. Keep this single.
+    Write-Error 'Not built yet. Run "npm install" and "npm run build" first.'
 }
 
 if (-not (Test-Path (Join-Path $root '.env'))) {
-    Write-Warning "No .env found in $root — the agent will refuse to start until you create one."
+    Write-Warning "No .env found in $root - the agent will refuse to start until you create one."
 }
 
 $action = New-ScheduledTaskAction `
@@ -47,7 +49,7 @@ Register-ScheduledTask `
     -Trigger     $trigger `
     -Settings    $settings `
     -Principal   $principal `
-    -Description 'Remote Personal Coding Agent — receives tasks from Telegram and runs GitHub Copilot CLI locally.' | Out-Null
+    -Description 'Remote Personal Coding Agent - receives tasks from Telegram and runs GitHub Copilot CLI locally.' | Out-Null
 
 Write-Host ""
 Write-Host "Registered scheduled task '$taskName'." -ForegroundColor Green
