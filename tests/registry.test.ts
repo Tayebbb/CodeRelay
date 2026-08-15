@@ -5,8 +5,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ProjectRegistry, ProjectRegistryError, isInside } from '../src/projects/registry.js';
 
+// GitHub's Windows runners return an 8.3 short path from os.tmpdir()
+// (C:\Users\RUNNER~1\...), which the registry rightly refuses. Canonicalise once
+// so tests use the long-form paths a real operator would register.
+const TMP_ROOT = fs.realpathSync.native(os.tmpdir());
+
 function tempProject(name: string): string {
-  const dir = path.join(os.tmpdir(), `rpca-test-${name}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const dir = path.join(TMP_ROOT, `rpca-test-${name}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   fs.mkdirSync(dir, { recursive: true });
   return dir;
 }

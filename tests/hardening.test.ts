@@ -17,7 +17,10 @@ import { execCommand } from '../src/util/exec.js';
 import { clearRegisteredSecrets, redact } from '../src/core/redact.js';
 
 function tmpDir(tag: string): string {
-  const dir = path.join(os.tmpdir(), `rpca-${tag}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const dir = path.join(
+    fs.realpathSync.native(os.tmpdir()),
+    `rpca-${tag}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+  );
   fs.mkdirSync(dir, { recursive: true });
   return dir;
 }

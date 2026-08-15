@@ -246,7 +246,7 @@ function newTask(prompt = 'Fix the login bug') {
 }
 
 before(async () => {
-  root = path.join(os.tmpdir(), `rpca-e2e-${Date.now()}`);
+  root = path.join(fs.realpathSync.native(os.tmpdir()), `rpca-e2e-${Date.now()}`);
   fs.mkdirSync(root, { recursive: true });
   fakeCopilotPath = path.join(root, 'fake-copilot.mjs');
   fs.writeFileSync(fakeCopilotPath, FAKE_COPILOT);

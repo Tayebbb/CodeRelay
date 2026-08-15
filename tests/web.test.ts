@@ -109,7 +109,7 @@ interface Harness {
 }
 
 async function startHarness(): Promise<Harness> {
-  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'coderelay-web-'));
+  const workspace = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'coderelay-web-'));
   const config = testConfig(workspace);
   createPasswordFile(config.web.authFile, PASSWORD);
 
