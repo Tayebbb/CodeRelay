@@ -148,6 +148,11 @@ export function loadEnvFile(root: string = PROJECT_ROOT): void {
 
 const EFFORT_LEVELS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 
+// Node timers overflow past 2^31-1 ms and fire IMMEDIATELY; an operator asking
+// for a huge limit means "effectively unlimited", so clamp instead of reject.
+const MAX_TIMER_MS = 2 ** 31 - 1;
+const clampMs = (ms: number): number => Math.min(ms, MAX_TIMER_MS);
+
 export interface LoadOptions {
   /** Skip validation of Telegram credentials (used by `doctor` and offline CLI commands). */
   requireTelegram?: boolean;
@@ -228,17 +233,17 @@ export function loadConfig(options: LoadOptions = {}): AppConfig {
       effort,
       agent: requestedAgent === 'none' ? null : requestedAgent,
       autopilot: bool('COPILOT_AUTOPILOT', true),
-      maxAutopilotContinues: int('MAX_AUTOPILOT_CONTINUES', 5, { min: 1, max: 50 }),
+      maxAutopilotContinues: int('MAX_AUTOPILOT_CONTINUES', 5, { min: 1 }),
       sandbox: bool('COPILOT_SANDBOX', false),
     },
     limits: {
       maxAiCreditsPerTask: num('MAX_AI_CREDITS_PER_TASK', 10),
       maxAiCreditsPerDay: num('MAX_AI_CREDITS_PER_DAY', 50),
-      maxTaskDurationMs: int('MAX_TASK_DURATION_MINUTES', 30, { min: 1, max: 720 }) * 60_000,
-      maxRetries: int('MAX_RETRIES', 2, { min: 0, max: 10 }),
-      maxConcurrentTasks: int('MAX_CONCURRENT_TASKS', 1, { min: 1, max: 4 }),
-      verifyTimeoutMs: int('VERIFY_TIMEOUT_MINUTES', 15, { min: 1, max: 180 }) * 60_000,
-      approvalTimeoutMs: int('APPROVAL_TIMEOUT_MINUTES', 60, { min: 1, max: 1440 }) * 60_000,
+      maxTaskDurationMs: clampMs(int('MAX_TASK_DURATION_MINUTES', 30, { min: 1 }) * 60_000),
+      maxRetries: int('MAX_RETRIES', 2, { min: 0 }),
+      maxConcurrentTasks: int('MAX_CONCURRENT_TASKS', 1, { min: 1 }),
+      verifyTimeoutMs: clampMs(int('VERIFY_TIMEOUT_MINUTES', 15, { min: 1 }) * 60_000),
+      approvalTimeoutMs: clampMs(int('APPROVAL_TIMEOUT_MINUTES', 60, { min: 1 }) * 60_000),
     },
     git: {
       autoCommit: bool('AUTO_COMMIT', true),
@@ -268,7 +273,7 @@ export function loadConfig(options: LoadOptions = {}): AppConfig {
     },
     orchestration: {
       enabled: bool('ORCHESTRATION', true),
-      maxAgentCalls: int('MAX_AGENT_CALLS_PER_TASK', 4, { min: 1, max: 10 }),
+      maxAgentCalls: int('MAX_AGENT_CALLS_PER_TASK', 4, { min: 1 }),
       reviewThreshold: num('REVIEW_CONFIDENCE_THRESHOLD', 0.75),
     },
     storage: {
@@ -285,8 +290,9 @@ export function loadConfig(options: LoadOptions = {}): AppConfig {
       // Localhost by default. Exposing this any wider is an explicit decision
       // documented under "Remote access", never an accident of installation.
       host: env('WEB_HOST') ?? '127.0.0.1',
-      port: int('WEB_PORT', 8787, { min: 1024, max: 65535 }),
-      sessionTtlMs: int('WEB_SESSION_TTL_HOURS', 24 * 7, { min: 1, max: 24 * 90 }) * 60 * 60 * 1000,
+      // The port range is a TCP fact, not a preference — it stays validated.
+      port: int('WEB_PORT', 8787, { min: 1, max: 65535 }),
+      sessionTtlMs: int('WEB_SESSION_TTL_HOURS', 24 * 7, { min: 1 }) * 60 * 60 * 1000,
       authFile: path.join(workspace, 'web-auth.json'),
     },
     logLevel,
