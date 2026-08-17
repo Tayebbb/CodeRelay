@@ -47,6 +47,8 @@ export interface ProviderCapabilities {
   nativeBudgetCeiling: boolean;
   /** Runs shell commands inside a sandbox rather than as the full user. */
   sandbox: boolean;
+  /** Can resume a previous session non-interactively (follow-up tasks). */
+  resumeSessions: boolean;
 }
 
 /** Capabilities this application treats as mandatory. */
@@ -121,6 +123,8 @@ export interface BuildArgsInput {
   effort: string | null;
   autopilot: boolean;
   maxAutopilotContinues: number;
+  /** Resume this provider session instead of starting cold (follow-up tasks). */
+  resumeSessionId?: string | null;
 }
 
 export interface AgentProvider {
@@ -159,6 +163,7 @@ const CONSEQUENCES: Record<keyof ProviderCapabilities, string> = {
   ignoreRepoMcp: 'a hostile repository could add its own tools through MCP',
   nativeBudgetCeiling: 'there is no in-process spend ceiling; only this application limits cost',
   sandbox: 'shell commands run with your full user rights',
+  resumeSessions: 'follow-up tasks cannot continue a previous agent session',
 };
 
 /**

@@ -127,6 +127,7 @@ export const HELP_TEXT = [
   '  /task <project> <…>   — queue a coding task',
   '  /cancel <id>          — cancel a queued or running task',
   '  /retry <id>           — re-queue a finished task',
+  '  /followup <id> <…>    — continue a finished task\u2019s agent session',
   '  /approve <id>         — approve a pending request',
   '  /reject <id>          — reject a pending request',
   '  /logs <id>            — event log for a task',

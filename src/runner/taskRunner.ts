@@ -22,7 +22,7 @@ import { buildExplorerPrompt, buildReviewPrompt, buildTaskPrompt } from './promp
 import { prepareRepository } from './preflight.js';
 import { publishChanges } from './publish.js';
 import { decideAfterCopilot, UNREPORTED_USAGE_FAILURE } from './stopReason.js';
-import { classifyTask, escalate, shouldReview } from '../orchestrator/plan.js';
+import { classifyTask, escalate, shouldReview, advisorySessionBudget, remainingSessionBudget } from '../orchestrator/plan.js';
 import { assessConfidence, parseReview, type ConfidenceResult } from '../orchestrator/confidence.js';
 import { isProviderId, selectProvider, type AgentProvider, type ProviderId, type ProviderInfo } from '../providers/index.js';
 import { formatReport } from '../telegram/format.js';
@@ -163,6 +163,22 @@ export class TaskRunner {
         tasks.addEvent(task.id, 'provider', `Using ${provider.displayName} — billed to ${provider.billing}`);
       }
 
+      // Follow-up tasks warm-start the parent's session. Guarded here too, not
+      // just at submission: the capability must hold on the machine that runs.
+      let resumeId = task.resumeSessionId ?? null;
+      if (resumeId && !provider.capabilities.resumeSessions) {
+        return await fail(
+          `${provider.displayName} cannot resume a previous session, so this follow-up cannot run. Submit a new task instead.`,
+        );
+      }
+      if (resumeId) {
+        tasks.addEvent(
+          task.id,
+          'session',
+          `Resuming agent session ${resumeId.slice(0, 8)}… from task #${task.parentTaskId ?? '?'}`,
+        );
+      }
+
       // A per-task model override (chosen in an interface) outranks the
       // configured default, but only when the installed CLI actually offers it —
       // the fallback chain stays intact either way.
@@ -261,12 +277,18 @@ export class TaskRunner {
       if (!config.orchestration.enabled) {
         plan = { ...plan, roles: ['implementer'], useExplorer: false, alwaysReview: false, agentBudget: 1 };
       }
+      // A follow-up resumes a session that already knows the codebase; paying
+      // for a fresh survey would spend credits to rediscover warm context.
+      if (resumeId) {
+        plan = { ...plan, useExplorer: false, roles: plan.roles.filter((r) => r !== 'explorer') };
+      }
       let agentCalls = 0;
       let explorationBrief: string | null = null;
       let reviewFindings: string[] | null = null;
       let reviewsDone = 0;
       let lastReviewVerdict: string | null = null;
       let confidence: ConfidenceResult | null = null;
+      const perTaskCap = config.limits.maxAiCreditsPerTask;
 
       tasks.addEvent(task.id, 'plan', `${plan.complexity}: ${plan.reason} → ${plan.roles.join(' → ')}`);
       await reporter.milestone(`🧭 ${plan.complexity.toUpperCase()} — ${plan.roles.join(' → ')} (${plan.reason})`);
@@ -284,7 +306,7 @@ export class TaskRunner {
           config,
           signal: controller.signal,
           deadline,
-          creditBudget: config.limits.maxAiCreditsPerTask,
+          creditBudget: advisorySessionBudget(perTaskCap, usage.aiCredits),
           changedFiles: async () => (isRepo ? await git.diffNameOnly(checkpointCommit ?? baseCommit) : []),
           onProgress: (t) => reporter.update(t, 'agent'),
         });
@@ -390,11 +412,12 @@ export class TaskRunner {
             secretEnvVars: SECRET_ENV_VARS,
             allowRepoInstructions: config.safety.allowRepoInstructions,
             allowRepoMcp: config.safety.githubMcp,
+            resumeSessionId: resumeId,
           }),
           cwd: project.path,
           timeoutMs: Math.min(remainingMs, config.limits.maxTaskDurationMs),
           maxTurns: Math.max(20, config.copilot.maxAutopilotContinues * 10),
-          creditBudget: config.limits.maxAiCreditsPerTask,
+          creditBudget: remainingSessionBudget(perTaskCap, usage.aiCredits),
           envPassthrough: config.safety.envPassthrough,
           signal: controller.signal,
           onProgress: (update) => {
@@ -408,6 +431,8 @@ export class TaskRunner {
         usage.aiCredits += copilotResult.aiCredits;
         usage.outputTokens += copilotResult.outputTokens;
         if (copilotResult.sessionId) usage.copilotSessionIds.push(copilotResult.sessionId);
+        // Retries continue the conversation the previous attempt advanced.
+        if (resumeId && copilotResult.sessionId) resumeId = copilotResult.sessionId;
         agentCalls += 1;
         // Findings are consumed by exactly one fix pass, never re-sent.
         reviewFindings = null;
@@ -420,6 +445,19 @@ export class TaskRunner {
 
         const tamper = gitSurfaceViolation();
         const injectedConfig = repoConfigViolation();
+        // The CLI prunes old sessions, so a stored id can stop resolving. That is
+        // a startup failure (exit 1, no JSON), not a generic agent error — tell
+        // the operator the recoverable truth instead of "Copilot exited with 1".
+        if (
+          resumeId &&
+          copilotResult.exitCode !== 0 &&
+          /no session, task, or name matched/i.test(copilotResult.stderr)
+        ) {
+          return await fail(
+            `The agent session this follow-up resumes (from task #${task.parentTaskId ?? '?'}) no longer exists on this machine — ` +
+              'the CLI has likely pruned it. Nothing was spent. Submit the request as a new task instead.',
+          );
+        }
         if (injectedConfig) {
           tasks.addEvent(task.id, 'security', `Copilot config appeared during the run: ${injectedConfig.replace(/\n/g, '; ')}`);
           return await fail(
@@ -448,8 +486,14 @@ export class TaskRunner {
           return await fail(action.message, action.status);
         }
         if (action.kind === 'halt') {
+          // Cut at the credit ceiling — but verification is FREE, so the work
+          // that exists is still checked and, if it proves out, committed. The
+          // guards at the top of the loop prevent any further paid session.
           await reporter.milestone(action.message);
-          break;
+          const touched = isRepo ? await git.diffNameOnly(checkpointCommit ?? baseCommit) : [];
+          // Nothing changed: tests would "pass" against an untouched tree and
+          // dress a starved run up as a completed task. Stop honestly instead.
+          if (touched.length === 0) break;
         }
         if (action.kind === 'switch-model') {
           runtimeModelSwitchUsed = true;
@@ -600,7 +644,7 @@ export class TaskRunner {
             config,
             signal: controller.signal,
             deadline,
-            creditBudget: config.limits.maxAiCreditsPerTask,
+            creditBudget: advisorySessionBudget(perTaskCap, usage.aiCredits),
             changedFiles: async () => (isRepo ? await git.diffNameOnly(reviewBase) : []),
             onProgress: (t) => reporter.update(t, 'agent'),
           });
@@ -707,6 +751,9 @@ export class TaskRunner {
           branch,
           changedFiles: safeChangedFiles,
           commitMessage: this.commitMessage(task, project),
+          // "3 files changed, 41 insertions(+), 7 deletions(-)" — so the phone
+          // approval card states the consequence, not just a file list.
+          diffSummary: (await git.diffStat(compareBase)).trim().split('\n').at(-1) ?? null,
         });
         commitHash = published.commitHash;
       }
@@ -726,7 +773,10 @@ export class TaskRunner {
 
       const succeeded =
         copilotResult !== null &&
-        copilotResult.exitCode === 0 &&
+        (copilotResult.exitCode === 0 ||
+          // Cut at the credit ceiling, but the work passed verification: that
+          // is a success that cost exactly the budget, not a failure.
+          (copilotResult.stopReason === 'credit-limit' && verifications.length > 0 && verificationsPassed)) &&
         (verifications.length === 0 || verificationsPassed);
 
       const finalStatus = succeeded ? 'COMPLETED' : 'FAILED';
@@ -767,6 +817,12 @@ export class TaskRunner {
     const failed = verifications.filter((v) => !v.passed);
     if (failed.length > 0) {
       return failed.map((v) => `${v.kind} failed: ${v.command}\n${v.summary}`).join('\n\n').slice(0, 4000);
+    }
+    if (copilotResult?.stopReason === 'credit-limit') {
+      return (
+        'Stopped at the per-task AI-credit budget before the work could be finished and verified. ' +
+        'Nothing was committed. Raise MAX_AI_CREDITS_PER_TASK, or follow up with a smaller request.'
+      );
     }
     if (copilotResult && copilotResult.exitCode !== 0) {
       return `Copilot exited with code ${copilotResult.exitCode}.\n${tailLines(copilotResult.stderr, 10)}`;

@@ -24,6 +24,7 @@ const state = {
   activeTask: null,
   activeTab: 'chat',
   mode: 'code',
+  followUpTo: null,
   eventSource: null,
   pendingApprovals: new Map(),
   diffCache: new Map(),
@@ -321,7 +322,13 @@ async function openTask(id, { keepTab = false } = {}) {
   const finished = TERMINAL.includes(task.status);
   $('cancel-button').classList.toggle('hidden', finished);
   $('retry-button').classList.toggle('hidden', !finished);
+  $('followup-button').classList.toggle('hidden', !finished || !task.canFollowUp);
   $('promote-button').classList.toggle('hidden', task.status !== 'QUEUED');
+  // The composer follows the open task: a finished, resumable task makes the
+  // next message a follow-up in the same agent session — one conversation, one
+  // window. The chip's × (or switching project) starts a fresh task instead.
+  if (finished && task.canFollowUp) armFollowUp(task, { focus: false });
+  else clearFollowUp();
   syncSendButton();
 
   for (const tab of document.querySelectorAll('.tab')) {
@@ -332,7 +339,7 @@ async function openTask(id, { keepTab = false } = {}) {
   stream.replaceChildren();
   state.liveLines = 0;
 
-  if (state.activeTab === 'chat') renderChat(stream, task, events);
+  if (state.activeTab === 'chat') renderChat(stream, task, events, await taskChain(task));
   else if (state.activeTab === 'changes') await renderChanges(stream, task);
   else if (state.activeTab === 'tests') renderTests(stream, task);
   else renderTimeline(stream, events);
@@ -389,7 +396,40 @@ function activityLine(text, ts) {
   return row;
 }
 
-function renderChat(stream, task, events) {
+// Ancestors of a follow-up, oldest first, so the chat reads as one thread.
+async function taskChain(task) {
+  const chain = [];
+  let parentId = task.parentTaskId;
+  for (let depth = 0; parentId && depth < 10; depth += 1) {
+    try {
+      const { task: parent } = await api(`/api/tasks/${parentId}`);
+      chain.unshift(parent);
+      parentId = parent.parentTaskId;
+    } catch {
+      break;
+    }
+  }
+  return chain;
+}
+
+function renderChat(stream, task, events, thread = []) {
+  for (const ancestor of thread) {
+    const past = document.createElement('div');
+    past.className = 'msg-user thread-past';
+    past.textContent = ancestor.prompt;
+    stream.append(past);
+    if (ancestor.agentMessage) {
+      const block = agentBlock(ancestor.model ?? null);
+      block.classList.add('thread-past');
+      block.querySelector('.agent-activity').remove();
+      block.append(renderAgentMessage(ancestor.agentMessage));
+      stream.append(block);
+    }
+    stream.append(sysLine(`task #${ancestor.id} · ${shortStatus(ancestor.status)} — followed up below`));
+  }
+  if (task.parentTaskId && thread.length === 0) {
+    stream.append(sysLine(`Follows task #${task.parentTaskId} — same agent session`));
+  }
   const user = document.createElement('div');
   user.className = 'msg-user';
   user.textContent = task.prompt;
@@ -888,8 +928,10 @@ async function sendTask() {
       model: selected?.dataset.model || null,
       provider: selected?.dataset.provider || null,
       mode: state.mode,
+      followUpTo: state.followUpTo,
     };
     const { task, awaitingApproval } = await api('/api/tasks', { method: 'POST', body: JSON.stringify(body) });
+    clearFollowUp();
     promptInput.value = '';
     promptInput.style.height = 'auto';
     note(awaitingApproval ? `Task #${task.id} needs approval before it runs.` : `Task #${task.id} queued.`);
@@ -904,6 +946,30 @@ async function sendTask() {
 }
 
 // ------------------------------------------------------------------ header actions
+
+// Follow-up mode: the next send resumes the chosen task's agent session. The
+// chip is the visible state; clicking it (or switching project) disarms it.
+function armFollowUp(task, { focus = true } = {}) {
+  state.followUpTo = task.id;
+  const chip = $('followup-chip');
+  chip.textContent = `↩ follows #${task.id} ×`;
+  chip.classList.remove('hidden');
+  $('project-select').value = task.projectId;
+  promptInput.placeholder = `Follow up on task #${task.id}…`;
+  if (focus) promptInput.focus();
+}
+
+function clearFollowUp() {
+  state.followUpTo = null;
+  $('followup-chip').classList.add('hidden');
+  promptInput.placeholder = 'Describe a coding task…';
+}
+
+$('followup-button').addEventListener('click', () => {
+  if (state.activeTask) armFollowUp(state.activeTask);
+});
+$('followup-chip').addEventListener('click', clearFollowUp);
+$('project-select').addEventListener('change', clearFollowUp);
 
 $('cancel-button').addEventListener('click', async () => {
   if (state.activeTaskId === null) return;

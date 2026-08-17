@@ -16,6 +16,7 @@ import type { ApprovalService } from '../approval/service.js';
 import type { Notifier } from '../notify/notifier.js';
 import type { AppConfig } from './config.js';
 import { assessRisk } from '../approval/risk.js';
+import { isProviderId, selectProvider } from '../providers/index.js';
 import { createLogger, errorMessage } from './logger.js';
 
 const log = createLogger('tasks');
@@ -35,6 +36,9 @@ export interface SubmitInput {
   model?: string | null;
   /** Per-task agent CLI override. Validated by the caller against installed providers. */
   provider?: string | null;
+  /** Set on follow-up tasks: resume this session of this parent task. */
+  parentTaskId?: number | null;
+  resumeSessionId?: string | null;
 }
 
 export type SubmitResult =
@@ -92,6 +96,8 @@ export class TaskService {
       origin: input.origin,
       model: input.model ?? null,
       provider: input.provider ?? null,
+      parentTaskId: input.parentTaskId ?? null,
+      resumeSessionId: input.resumeSessionId ?? null,
     });
 
     if (needsApproval) {
@@ -102,6 +108,60 @@ export class TaskService {
 
     queue.kick();
     return { ok: true, task, awaitingApproval: false };
+  }
+
+  /**
+   * Queue a task that RESUMES the parent task's agent session — a warm
+   * follow-up ("now also add tests for timezone handling") instead of a cold
+   * re-exploration. Still exactly one intentional agent execution, through the
+   * same risk gate, queue cap and budgets as any other task.
+   */
+  followUp(
+    parentId: number,
+    input: { origin: TaskOrigin; userId: number; chatId: number; prompt: string; model?: string | null },
+  ): SubmitResult {
+    const { tasks, config } = this.deps;
+
+    const parent = tasks.get(parentId);
+    if (!parent) return { ok: false, error: `Task #${parentId} not found.` };
+    if (!isTerminal(parent.status)) {
+      return { ok: false, error: `Task #${parentId} is still ${parent.status} — follow up once it has finished.` };
+    }
+
+    // Advisory sessions are never recorded here, so the last id is the final
+    // implementer session — the conversation that actually made the change.
+    const sessionId = parent.usage.copilotSessionIds.at(-1) ?? null;
+    if (!sessionId) {
+      return { ok: false, error: `Task #${parentId} left no resumable agent session. Submit a new task instead.` };
+    }
+
+    // The session belongs to ONE CLI; a follow-up must run on the same provider
+    // (and therefore bill the same plan) — never silently on another.
+    const providerId = parent.provider && isProviderId(parent.provider) ? parent.provider : config.provider;
+    let capable: boolean;
+    try {
+      capable = selectProvider(providerId).capabilities.resumeSessions;
+    } catch (err) {
+      return { ok: false, error: errorMessage(err) };
+    }
+    if (!capable) {
+      return {
+        ok: false,
+        error: `${providerId} cannot resume a previous session on this machine. Submit a new task instead.`,
+      };
+    }
+
+    return this.submit({
+      origin: input.origin,
+      userId: input.userId,
+      chatId: input.chatId,
+      projectId: parent.projectId,
+      prompt: input.prompt,
+      model: input.model ?? parent.model,
+      provider: parent.provider,
+      parentTaskId: parent.id,
+      resumeSessionId: sessionId,
+    });
   }
 
   /**
@@ -161,6 +221,8 @@ export class TaskService {
       origin: task.origin,
       model: task.model,
       provider: task.provider,
+      parentTaskId: task.parentTaskId,
+      resumeSessionId: task.resumeSessionId,
     });
     tasks.addEvent(created.id, 'retry', `Re-queued from task #${id}`);
 

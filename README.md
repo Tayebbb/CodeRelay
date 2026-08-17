@@ -119,12 +119,35 @@ blueprints.
 
 ---
 
+## Why not the official remote controls?
+
+Fair question — Claude Code, Copilot CLI and Codex all ship first-party phone
+remotes now (Claude “Remote Control” and its Telegram channel plugin, Copilot
+`--remote` → GitHub Mobile, Codex in the ChatGPT app). They are polished, free
+with your plan, and their sandboxes are stronger than anything CodeRelay can
+add. If you live inside one vendor and their app does what you need — use it.
+
+CodeRelay exists for what they don't offer:
+
+|                          | Official remotes                                             | CodeRelay                                                               |
+| ------------------------ | ------------------------------------------------------------ | ----------------------------------------------------------------------- |
+| Agents                   | one vendor's, each in its own app                            | Copilot **and** Claude Code, chosen per task, one interface             |
+| Where session data lives | the vendor's servers (Claude RC stores transcripts remotely) | your PC — nothing is relayed except the messages you read               |
+| Verifies the work        | no — you read the transcript                                 | runs **your** test suite, bounded retries, reports pass/fail            |
+| Git safety               | the agent's own undo (misses shell-made changes)             | independent checkpoint of even uncommitted work + hostile-repo scanning |
+| Fire-and-forget tasks    | mostly you steer a live session                              | submit and walk away; the PC runs, verifies, commits, reports           |
+| Telegram for Copilot     | doesn't exist                                                | yes                                                                     |
+| Extra cost               | none                                                         | none                                                                    |
+
+---
+
 ## The details
 
 _Reference for setup choices, day-to-day use, and — further down — the
 technical internals for those who want them._
 
 - [What it actually does](#what-it-actually-does)
+- [Why not the official remote controls?](#why-not-the-official-remote-controls)
 - [Is this safe? Read this first](#is-this-safe-read-this-first)
 - [Requirements](#requirements)
 - [Install, step by step](#install-step-by-step)
@@ -399,17 +422,18 @@ The part before the `:` is the project id. With a single project registered you 
 
 ### Commands
 
-| Command                          | What it does                           |
-| -------------------------------- | -------------------------------------- |
-| `/help`                          | Command list                           |
-| `/status`                        | Connection, model, queue, credits used |
-| `/projects`                      | Registered projects                    |
-| `/tasks`                         | Recent tasks and their state           |
-| `/logs <id>`                     | Detailed log for one task              |
-| `/cancel <id>`                   | Stop a running task                    |
-| `/retry <id>`                    | Re-run a failed task                   |
-| `/usage`                         | AI credits used                        |
-| `/approve <id>` · `/reject <id>` | Answer an approval by text             |
+| Command                          | What it does                             |
+| -------------------------------- | ---------------------------------------- |
+| `/help`                          | Command list                             |
+| `/status`                        | Connection, model, queue, credits used   |
+| `/projects`                      | Registered projects                      |
+| `/tasks`                         | Recent tasks and their state             |
+| `/logs <id>`                     | Detailed log for one task                |
+| `/cancel <id>`                   | Stop a running task                      |
+| `/retry <id>`                    | Re-run a failed task                     |
+| `/followup <id> <…>`             | Continue a finished task's agent session |
+| `/usage`                         | AI credits used                          |
+| `/approve <id>` · `/reject <id>` | Answer an approval by text               |
 
 ### What a run looks like
 
@@ -467,6 +491,12 @@ whole point is that you are away from the PC.
   can be chosen per task; unavailable ones are shown but not selectable.
 - **Modes** — Code, Plan, Review, Debug, Ask — shape the task on the server,
   so both interfaces get identical orchestration.
+- **Follow-ups.** A finished task grows a **Follow up** button: the next
+  request resumes the _same agent session_ (“now also add tests for timezone
+  handling”) instead of paying a fresh session to rediscover the codebase.
+  One intentional agent run, through the same risk gate, budgets and
+  approvals as any task. (Copilot only for now — Claude Code sessions are
+  deliberately never written to disk.)
 - **Live streaming** over Server-Sent Events: progress lines, approval cards
   and status changes appear without a refresh, and reconnects replay what you
   missed.
@@ -588,6 +618,13 @@ Per-task detail: `npm run agent -- logs <id>`.
 
 A simple bug fix costs roughly **1 AI credit**. Daily and per-task ceilings are enforced locally, and it never enables paid overage. And because no AI action ever happens without a task you sent, an idle agent — running all week, surviving reboots — costs exactly nothing.
 
+Two things that change the per-task cost, both visible in the plan line the
+task announces: a project with **no detectable test or build command** gets a
+read-only review pass instead (roughly one extra credit per task — register a
+test command to avoid it), and complex requests may add a survey/review pass
+under `MAX_AGENT_CALLS_PER_TASK`. A **follow-up** costs the same as any single
+agent run — usually less, since the session already knows the codebase.
+
 ---
 
 ## How it works (technical)
@@ -698,7 +735,7 @@ boundaries, test strategy — see **[project-analysis.md](project-analysis.md)**
 4. **The PC must be on, awake and signed in.**
 5. **The model catalogue changes.** The Copilot CLI auto-updates; re-run `npm run agent -- models` afterwards.
 6. **Windows-first.** Startup automation ships for Windows only.
-7. **Known Copilot CLI issue (verified on 1.0.79).** A CLI regression makes any per-path `--deny-tool=write(…)` rule deny **all** file writes, so the agent reports “Blocked — I could not write any files” and completes without changes. The web UI shows the agent's exact words, so this is visible rather than silent. Status on 1.0.80 is unverified. If you hit it: `copilot update`, retry the task, and watch the agent's own report.
+7. **Per-path write rules bind the CLI's file tools, not the shell (probed on 1.0.80).** The earlier 1.0.79 regression — any `--deny-tool=write(…)` rule denying **all** file writes — is gone: files are created normally with the deny rules present. But the same probe watched the agent write a denied `.env` through a shell command, exactly as the CLI's own docs warn. Read the write deny-list as defence in depth; the checkpoint, the sensitive-file commit screen and redaction are the layers that actually protect those files.
 
 ---
 

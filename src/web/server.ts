@@ -28,6 +28,7 @@ import type { CopilotInfo } from '../copilot/detect.js';
 import { selectModel } from '../copilot/detect.js';
 import type { ApprovalRequest, Notifier } from '../notify/notifier.js';
 import { Git } from '../git/git.js';
+import { isTerminal } from '../domain/task.js';
 import { LoginThrottle, passwordFileExists, SessionStore, verifyPassword } from './auth.js';
 import { isProviderId, PROVIDER_IDS, selectProvider, type ProviderId, type ProviderInfo } from '../providers/index.js';
 
@@ -375,6 +376,18 @@ export class WebServer {
   }
 
   private taskJson(task: NonNullable<ReturnType<TaskRepository['get']>>): Record<string, unknown> {
+    // A follow-up needs a finished task, a recorded session, and a provider
+    // that can actually resume one — the button must never promise otherwise.
+    const providerId =
+      task.provider && isProviderId(task.provider) ? task.provider : this.deps.config.provider;
+    let canFollowUp = false;
+    if (isTerminal(task.status) && task.usage.copilotSessionIds.length > 0) {
+      try {
+        canFollowUp = selectProvider(providerId).capabilities.resumeSessions;
+      } catch {
+        canFollowUp = false;
+      }
+    }
     return {
       id: task.id,
       projectId: task.projectId,
@@ -392,11 +405,16 @@ export class WebServer {
       origin: task.origin,
       model: task.model,
       provider: task.provider,
+      parentTaskId: task.parentTaskId,
+      canFollowUp,
       aiCredits: task.usage.aiCredits,
       files: task.result?.filesChanged ?? [],
       linesAdded: task.result?.linesAdded ?? 0,
       linesRemoved: task.result?.linesRemoved ?? 0,
-      testsPassed: task.result?.verifications?.every((v) => v.passed) ?? null,
+      // `[].every()` is true — an unverified task must say "not run", never "passed".
+      testsPassed: task.result?.verifications?.length
+        ? task.result.verifications.every((v) => v.passed)
+        : null,
       // The agent's own final message, stored verbatim (post-redaction) by the
       // runner. The UI must present it as-is — never paraphrased.
       agentMessage: task.result?.summary ?? null,
@@ -461,6 +479,32 @@ export class WebServer {
     const model = typeof body?.model === 'string' && body.model !== '' ? body.model : null;
     const requestedProvider = typeof body?.provider === 'string' && body.provider !== '' ? body.provider : null;
     const mode = typeof body?.mode === 'string' && body.mode in MODE_DIRECTIVES ? body.mode : 'code';
+    const followUpTo =
+      typeof body?.followUpTo === 'number' && Number.isInteger(body.followUpTo) && body.followUpTo > 0
+        ? body.followUpTo
+        : null;
+
+    // A follow-up inherits project and provider from its parent; the service
+    // validates the parent, the session and the provider capability.
+    if (followUpTo !== null) {
+      const parent = this.deps.tasks.get(followUpTo);
+      if (!parent) return this.json(res, 404, { error: `Task #${followUpTo} not found.` });
+      const parentProvider =
+        parent.provider && isProviderId(parent.provider) ? parent.provider : this.deps.config.provider;
+      const parentInfo = this.providerInfoFor(parentProvider);
+      if (model && !(parentInfo?.models ?? this.deps.copilot.models).includes(model)) {
+        return this.json(res, 400, { error: `Model "${model}" is not offered by the installed CLI.` });
+      }
+      const result = this.deps.service.followUp(followUpTo, {
+        origin: 'web',
+        userId: 0,
+        chatId: 0,
+        prompt: MODE_DIRECTIVES[mode] + rawPrompt,
+        model,
+      });
+      if (!result.ok) return this.json(res, 400, { error: result.error });
+      return this.json(res, 201, { task: this.taskJson(result.task), awaitingApproval: result.awaitingApproval });
+    }
 
     if (requestedProvider && !isProviderId(requestedProvider)) {
       return this.json(res, 400, { error: `Unknown agent provider "${requestedProvider}".` });

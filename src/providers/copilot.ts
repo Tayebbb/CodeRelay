@@ -48,6 +48,7 @@ export const copilotProvider: AgentProvider = {
     ignoreRepoMcp: true, // --disable-builtin-mcps
     nativeBudgetCeiling: true, // --max-ai-credits
     sandbox: true, // --sandbox --experimental
+    resumeSessions: true, // --resume=<session-id>, verified on 1.0.80 with -p
   },
 
   async detect(binOverride: string | null): Promise<ProviderInfo> {
@@ -86,6 +87,7 @@ export const copilotProvider: AgentProvider = {
       allowRepoInstructions: input.allowRepoInstructions,
       githubMcp: input.allowRepoMcp,
       secretEnvVars: input.secretEnvVars,
+      resumeSessionId: input.resumeSessionId ?? null,
       permissionArgs,
     });
   },

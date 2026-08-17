@@ -95,6 +95,13 @@ const MIGRATIONS: Array<{ id: number; sql: string }> = [
       ALTER TABLE tasks ADD COLUMN provider TEXT;
     `,
   },
+  {
+    id: 6,
+    sql: `
+      ALTER TABLE tasks ADD COLUMN parent_task_id INTEGER;
+      ALTER TABLE tasks ADD COLUMN resume_session_id TEXT;
+    `,
+  },
 ];
 
 export class DatabaseCorruptError extends Error {}

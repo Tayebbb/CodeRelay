@@ -370,6 +370,9 @@ button { font: inherit; cursor: pointer; color: inherit; background: none; borde
   animation: rise var(--t-med) var(--ease);
 }
 
+/* Earlier turns of a follow-up thread: present but visually receded */
+.thread-past { opacity: 0.62; animation: none; }
+
 /* CodeRelay system events: quiet one-liners, clearly not the agent's voice */
 .sys-line {
   display: flex;

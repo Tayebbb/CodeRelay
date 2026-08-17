@@ -437,6 +437,25 @@ export class TelegramBot implements Notifier {
       await ctx.reply(result.ok ? `🔁 ${result.message}` : result.error);
     });
 
+    this.bot.command('followup', async (ctx) => {
+      const match = /^(\d+)\s+([\s\S]+)$/.exec((ctx.match ?? '').trim());
+      if (!match) {
+        return void (await ctx.reply('Usage: /followup <task id> <what to do next>\n\nContinues that task\u2019s agent session instead of starting cold.'));
+      }
+      const result = this.deps.service.followUp(Number.parseInt(match[1]!, 10), {
+        origin: 'telegram',
+        userId: ctx.from?.id ?? 0,
+        chatId: ctx.chat.id,
+        prompt: match[2]!,
+      });
+      if (!result.ok) return void (await ctx.reply(result.error));
+      await ctx.reply(
+        result.awaitingApproval
+          ? `⚠️ Task #${result.task.id} needs approval before it runs (follows #${match[1]}).`
+          : `↩️ Task #${result.task.id} queued — continues the agent session of #${match[1]}.`,
+      );
+    });
+
     this.bot.command('approve', async (ctx) => this.decide(ctx.match ?? '', 'APPROVED', ctx));
     this.bot.command('reject', async (ctx) => this.decide(ctx.match ?? '', 'REJECTED', ctx));
 

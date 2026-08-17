@@ -1,10 +1,43 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { classifyTask, escalate, shouldReview, touchesSecuritySurface, type TaskPlan } from '../src/orchestrator/plan.js';
+import {
+  advisorySessionBudget,
+  classifyTask,
+  escalate,
+  remainingSessionBudget,
+  shouldReview,
+  touchesSecuritySurface,
+  type TaskPlan,
+} from '../src/orchestrator/plan.js';
 import { assessConfidence, parseReview } from '../src/orchestrator/confidence.js';
 
 const plan = (request: string, opts: { unverifiable?: boolean; max?: number } = {}): TaskPlan =>
   classifyTask({ request, unverifiable: opts.unverifiable ?? false, maxAgentCalls: opts.max ?? 4 });
+
+describe('session budget slicing', () => {
+  test('an advisory session can never spend the whole task budget', () => {
+    // Observed live: a survey handed the full 15-credit cap burned all of it
+    // and the implementer never ran. A quarter is the ceiling.
+    assert.equal(advisorySessionBudget(15, 0), 3);
+    assert.equal(advisorySessionBudget(10, 0), 2);
+    assert.equal(advisorySessionBudget(4, 0), 1);
+    assert.ok(advisorySessionBudget(15, 0) < 15);
+  });
+
+  test('an advisory session is also capped by what is left', () => {
+    assert.ok(advisorySessionBudget(15, 14.5) <= 0.5);
+  });
+
+  test('a later session only gets the remainder, never the full cap again', () => {
+    assert.equal(remainingSessionBudget(15, 10), 5);
+    assert.ok(remainingSessionBudget(15, 14.99) > 0, 'a positive remainder stays enforceable');
+  });
+
+  test('an uncapped task stays uncapped in the executor\u2019s language (0)', () => {
+    assert.equal(remainingSessionBudget(0, 5), 0);
+    assert.equal(advisorySessionBudget(0, 5), 0);
+  });
+});
 
 describe('orchestration: choosing how much AI to spend', () => {
   test('a trivial edit gets exactly one agent', () => {

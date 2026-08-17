@@ -150,6 +150,27 @@ export function shouldReview(plan: TaskPlan, budget: ReviewBudget): ReviewDecisi
   return affordable ? { review: true } : { review: false, reason: 'unaffordable' };
 }
 
+/**
+ * Credits one more session may spend, given what the task already spent.
+ * Passing the FULL per-task cap to every session let a single session bill the
+ * whole budget on its own even after earlier sessions had spent theirs.
+ */
+export function remainingSessionBudget(perTaskCap: number, spent: number): number {
+  if (perTaskCap <= 0) return 0; // 0 = uncapped, in the executor's language
+  return Math.max(0.1, perTaskCap - spent);
+}
+
+/**
+ * Credits an ADVISORY (read-only) session may spend: a quarter of the task
+ * budget, never the whole pot. Observed live: a survey handed the full cap
+ * burned all of it, so the implementer — the only role that produces the
+ * change — never ran. A survey that costs the task is worse than no survey.
+ */
+export function advisorySessionBudget(perTaskCap: number, spent: number): number {
+  if (perTaskCap <= 0) return 0;
+  return Math.min(remainingSessionBudget(perTaskCap, spent), Math.max(1, Math.floor(perTaskCap / 4)));
+}
+
 function countMatches(text: string, patterns: RegExp[]): number {
   return patterns.reduce((n, re) => (re.test(text) ? n + 1 : n), 0);
 }

@@ -416,6 +416,152 @@ describe('web interface', () => {
     assert.match(stored.prompt, /migrate to postgres/);
   });
 
+  // -------------------------------------------------------------- follow-ups
+
+  /** A COMPLETED parent with a recorded agent session, ready to follow up on. */
+  function finishedParent(sessionId: string | null): number {
+    const created = h.tasks.create({
+      userId: 0,
+      chatId: 0,
+      projectId: 'demo',
+      prompt: 'fix the parser',
+      approvalRequired: false,
+      approvalReason: null,
+      origin: 'web',
+    });
+    h.tasks.transition(created.id, 'RUNNING');
+    if (sessionId) {
+      h.tasks.updateUsage(created.id, {
+        aiCredits: 1,
+        outputTokens: 10,
+        copilotSessionIds: [sessionId],
+        unreportedRuns: 0,
+      });
+    }
+    h.tasks.transition(created.id, 'COMPLETED');
+    return created.id;
+  }
+
+  test('a follow-up inherits project, provider and the parent session', () => {
+    const parentId = finishedParent('sess-abc-123');
+    const result = h.service.followUp(parentId, {
+      origin: 'web',
+      userId: 0,
+      chatId: 0,
+      prompt: 'also add tests for timezone handling',
+    });
+    assert.ok(result.ok, result.ok ? '' : result.error);
+    if (!result.ok) return;
+    const stored = h.tasks.get(result.task.id)!;
+    assert.equal(stored.parentTaskId, parentId);
+    assert.equal(stored.resumeSessionId, 'sess-abc-123');
+    assert.equal(stored.projectId, 'demo');
+  });
+
+  test('a follow-up on an unfinished task is refused', () => {
+    const created = h.tasks.create({
+      userId: 0,
+      chatId: 0,
+      projectId: 'demo',
+      prompt: 'still running',
+      approvalRequired: false,
+      approvalReason: null,
+      origin: 'web',
+    });
+    h.tasks.transition(created.id, 'RUNNING');
+    const result = h.service.followUp(created.id, { origin: 'web', userId: 0, chatId: 0, prompt: 'more' });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.match(result.error, /still RUNNING/);
+  });
+
+  test('a follow-up on a task with no recorded session is refused', () => {
+    const parentId = finishedParent(null);
+    const result = h.service.followUp(parentId, { origin: 'web', userId: 0, chatId: 0, prompt: 'more' });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.match(result.error, /no resumable agent session/);
+  });
+
+  test('a follow-up whose provider cannot resume sessions is refused', () => {
+    const created = h.tasks.create({
+      userId: 0,
+      chatId: 0,
+      projectId: 'demo',
+      prompt: 'claude task',
+      approvalRequired: false,
+      approvalReason: null,
+      origin: 'web',
+      provider: 'claude',
+    });
+    h.tasks.transition(created.id, 'RUNNING');
+    h.tasks.updateUsage(created.id, { aiCredits: 1, outputTokens: 1, copilotSessionIds: ['s1'], unreportedRuns: 0 });
+    h.tasks.transition(created.id, 'COMPLETED');
+    const result = h.service.followUp(created.id, { origin: 'web', userId: 0, chatId: 0, prompt: 'more' });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.match(result.error, /cannot resume/);
+  });
+
+  test('a risky follow-up prompt still passes through the approval gate', () => {
+    const parentId = finishedParent('sess-risky');
+    const result = h.service.followUp(parentId, {
+      origin: 'web',
+      userId: 0,
+      chatId: 0,
+      prompt: 'now git push origin main',
+    });
+    assert.ok(result.ok);
+    if (result.ok) assert.equal(result.awaitingApproval, true, 'the risk gate must not be bypassed by follow-ups');
+  });
+
+  test('POST /api/tasks with followUpTo creates a linked task', async () => {
+    const parentId = finishedParent('sess-web-1');
+    const response = await fetch(`${h.base}/api/tasks`, {
+      method: 'POST',
+      headers: authed(cookie),
+      body: JSON.stringify({ prompt: 'tighten the error message', followUpTo: parentId }),
+    });
+    assert.equal(response.status, 201);
+    const { task } = (await response.json()) as { task: { id: number; parentTaskId: number } };
+    assert.equal(task.parentTaskId, parentId);
+    assert.equal(h.tasks.get(task.id)!.resumeSessionId, 'sess-web-1');
+  });
+
+  test('POST /api/tasks with an unknown followUpTo is a 404', async () => {
+    const response = await fetch(`${h.base}/api/tasks`, {
+      method: 'POST',
+      headers: authed(cookie),
+      body: JSON.stringify({ prompt: 'x', followUpTo: 999999 }),
+    });
+    assert.equal(response.status, 404);
+  });
+
+  test('canFollowUp is exposed only for finished tasks with a session', async () => {
+    const parentId = finishedParent('sess-flag');
+    const detail = await fetch(`${h.base}/api/tasks/${parentId}`, { headers: { Cookie: cookie } });
+    const { task } = (await detail.json()) as { task: { canFollowUp: boolean } };
+    assert.equal(task.canFollowUp, true);
+
+    const bare = finishedParent(null);
+    const bareDetail = await fetch(`${h.base}/api/tasks/${bare}`, { headers: { Cookie: cookie } });
+    const bareJson = (await bareDetail.json()) as { task: { canFollowUp: boolean } };
+    assert.equal(bareJson.task.canFollowUp, false);
+  });
+
+  test('retrying a follow-up preserves the session link', () => {
+    const parentId = finishedParent('sess-retry');
+    const follow = h.service.followUp(parentId, { origin: 'web', userId: 0, chatId: 0, prompt: 'polish it' });
+    assert.ok(follow.ok);
+    if (!follow.ok) return;
+    h.tasks.transition(follow.task.id, 'RUNNING');
+    h.tasks.transition(follow.task.id, 'FAILED', { error: 'x' });
+
+    const retried = h.service.retry(follow.task.id);
+    assert.ok(retried.ok);
+    if (!retried.ok) return;
+    const clone = h.tasks.get(retried.taskId!)!;
+    assert.equal(clone.parentTaskId, parentId);
+    assert.equal(clone.resumeSessionId, 'sess-retry');
+  });
+
   // -------------------------------------------------------------- approvals
 
   test('a pending approval can be resolved from the web and unblocks the core', async () => {

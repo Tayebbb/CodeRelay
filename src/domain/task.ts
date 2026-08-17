@@ -101,6 +101,10 @@ export interface Task {
   provider: string | null;
   /** Queue precedence: higher first, then FIFO by id. 0 = normal. */
   priority: number;
+  /** Task this one follows up on, when it resumes that task's agent session. */
+  parentTaskId: number | null;
+  /** Provider session to resume instead of starting cold. */
+  resumeSessionId: string | null;
 }
 
 export interface NewTask {
@@ -113,6 +117,8 @@ export interface NewTask {
   origin?: TaskOrigin;
   model?: string | null;
   provider?: string | null;
+  parentTaskId?: number | null;
+  resumeSessionId?: string | null;
 }
 
 export const EMPTY_USAGE: TaskUsage = { aiCredits: 0, outputTokens: 0, copilotSessionIds: [], unreportedRuns: 0 };

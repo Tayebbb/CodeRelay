@@ -103,6 +103,7 @@
           </div>
           <div class="task-actions">
             <button id="promote-button" class="ghost-button hidden">Move up</button>
+            <button id="followup-button" class="ghost-button hidden">Follow up</button>
             <button id="retry-button" class="ghost-button hidden">Retry</button>
             <button id="cancel-button" class="ghost-button danger hidden">Cancel</button>
           </div>
@@ -122,6 +123,7 @@
           <div class="composer glass">
             <textarea id="prompt-input" rows="1" placeholder="Describe a coding task…" maxlength="4000" aria-label="Task description"></textarea>
             <div class="composer-bar">
+              <button id="followup-chip" class="chip-select hidden" type="button" title="Cancel follow-up"></button>
               <select id="project-select" class="chip-select" aria-label="Project"></select>
               <select id="model-select" class="chip-select" aria-label="Model"></select>
               <div id="mode-control" class="segmented" role="radiogroup" aria-label="Mode">

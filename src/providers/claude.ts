@@ -64,6 +64,10 @@ export const claudeProvider: AgentProvider = {
     ignoreRepoMcp: true, // --strict-mcp-config
     nativeBudgetCeiling: true, // --max-budget-usd
     sandbox: false,
+    // We pass --no-session-persistence (sessions are never written to disk), so
+    // there is nothing to resume. Enabling this would first need a live-verified
+    // run WITH persistence and a decision about where session state lands.
+    resumeSessions: false,
   },
 
   async detect(binOverride: string | null): Promise<ProviderInfo> {

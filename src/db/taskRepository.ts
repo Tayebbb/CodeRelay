@@ -39,6 +39,8 @@ interface TaskRow {
   model: string | null;
   provider: string | null;
   priority: number;
+  parent_task_id: number | null;
+  resume_session_id: string | null;
 }
 
 function parseJson<T>(raw: string | null, fallback: T): T {
@@ -75,6 +77,8 @@ function toTask(row: TaskRow): Task {
     model: row.model,
     provider: row.provider ?? null,
     priority: row.priority ?? 0,
+    parentTaskId: row.parent_task_id ?? null,
+    resumeSessionId: row.resume_session_id ?? null,
   };
 }
 
@@ -100,8 +104,9 @@ export class TaskRepository {
     const status: TaskStatus = input.approvalRequired ? 'WAITING_APPROVAL' : 'QUEUED';
     const stmt = this.db.prepare(
       `INSERT INTO tasks (user_id, chat_id, project_id, prompt, status, created_at,
-                          approval_required, approval_status, approval_reason, usage_json, origin, model, provider)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                          approval_required, approval_status, approval_reason, usage_json, origin, model, provider,
+                          parent_task_id, resume_session_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const info = stmt.run(
       input.userId,
@@ -117,6 +122,8 @@ export class TaskRepository {
       input.origin ?? 'telegram',
       input.model ?? null,
       input.provider ?? null,
+      input.parentTaskId ?? null,
+      input.resumeSessionId ?? null,
     );
     const task = this.get(Number(info.lastInsertRowid))!;
     this.bus?.publish('task-created', task.id, { projectId: task.projectId, status: task.status });

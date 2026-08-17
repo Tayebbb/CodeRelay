@@ -34,6 +34,8 @@ export interface PublishInput {
   /** Files the agent changed, already screened for sensitive paths. */
   changedFiles: string[];
   commitMessage: string;
+  /** One-line `git diff --stat` summary, shown on approval cards. */
+  diffSummary?: string | null;
 }
 
 export interface PublishResult {
@@ -69,8 +71,11 @@ export async function publishChanges(input: PublishInput): Promise<PublishResult
       chatId: task.chatId,
       title: 'Push to remote',
       project: project.name,
-      reason: `AUTO_PUSH is enabled. Push ${commitHash.slice(0, 8)} to origin/${branch}?`,
-      details: changedFiles.slice(0, APPROVAL_FILE_PREVIEW),
+      reason: `AUTO_PUSH is enabled. Push ${commitHash.slice(0, 8)} to origin/${branch}? This uploads the commit to the remote repository.`,
+      details: [
+        ...(input.diffSummary ? [input.diffSummary] : []),
+        ...changedFiles.slice(0, APPROVAL_FILE_PREVIEW),
+      ],
     },
     { signal },
   );
@@ -94,8 +99,11 @@ async function approveProtectedBranch(input: PublishInput): Promise<boolean> {
       chatId: task.chatId,
       title: 'Commit to a protected branch',
       project: project.name,
-      reason: `Branch "${branch}" is listed in PROTECTED_BRANCHES.`,
-      details: changedFiles.slice(0, APPROVAL_FILE_PREVIEW),
+      reason: `Branch "${branch}" is listed in PROTECTED_BRANCHES. The commit stays on this machine unless a push is separately approved.`,
+      details: [
+        ...(input.diffSummary ? [input.diffSummary] : []),
+        ...changedFiles.slice(0, APPROVAL_FILE_PREVIEW),
+      ],
     },
     { signal },
   );

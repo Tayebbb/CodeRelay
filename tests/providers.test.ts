@@ -100,6 +100,14 @@ describe('copilot provider stays behaviour-identical', () => {
     assert.ok(!copilotProvider.buildArgs(input()).includes('--deny-tool=write'));
   });
 
+  test('a follow-up resumes the parent session by explicit id, and only then', () => {
+    assert.ok(copilotProvider.capabilities.resumeSessions);
+    const resumed = copilotProvider.buildArgs(input({ resumeSessionId: 'sess-42' }));
+    assert.ok(resumed.includes('--resume=sess-42'));
+    const cold = copilotProvider.buildArgs(input());
+    assert.ok(!cold.some((a) => a.startsWith('--resume')), 'a cold task must never resume anything');
+  });
+
   test('never passes a blanket-permission flag', () => {
     for (const flag of ['--yolo', '--allow-all', '--allow-all-paths', '--allow-all-urls']) {
       assert.ok(!copilotProvider.buildArgs(input({ readOnly: true })).includes(flag), flag);
@@ -108,6 +116,13 @@ describe('copilot provider stays behaviour-identical', () => {
 });
 
 describe('claude provider', () => {
+  test('declares that it cannot resume sessions, and never emits a resume flag', () => {
+    assert.equal(claudeProvider.capabilities.resumeSessions, false);
+    const args = claudeProvider.buildArgs(input({ resumeSessionId: 'sess-42' }));
+    assert.ok(!args.some((a) => a.includes('--resume') || a.includes('sess-42')));
+    assert.ok(args.includes('--no-session-persistence'));
+  });
+
   test('runs headless with a machine-readable stream', () => {
     const args = claudeProvider.buildArgs(input());
     assert.equal(args[0], '-p');

@@ -17,13 +17,13 @@ back — with diffs, test output and cost.
 
 Design constraints that shaped everything:
 
-| Constraint | Consequence |
-| ---------- | ----------- |
-| **Zero recurring cost** | No servers, no cloud, no paid APIs. One runtime dependency (`grammy` for Telegram). SQLite via Node's built-in `node:sqlite`. Web UI has zero frontend dependencies and no build step. |
-| **The AI comes from an existing subscription** | The Copilot CLI is the execution engine; this project never bills anything itself and enforces credit budgets locally. |
-| **Unattended operation on a personal machine** | Everything is designed for the owner being far away: crash recovery, budget ceilings, approval gates over Telegram/web, startup failure notifications. |
-| **Target repositories are treated as hostile** | A cloned repo can carry hooks, filter drivers, planted binaries, agent-instruction files and MCP configs. All are detected or neutralised (see §7). |
-| **Never trust the AI's claims** | Verification runs the project's own test command; advisory (read-only) agent roles are checked against git state, not trusted to obey their prompt. |
+| Constraint                                     | Consequence                                                                                                                                                                            |
+| ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Zero recurring cost**                        | No servers, no cloud, no paid APIs. One runtime dependency (`grammy` for Telegram). SQLite via Node's built-in `node:sqlite`. Web UI has zero frontend dependencies and no build step. |
+| **The AI comes from an existing subscription** | The Copilot CLI is the execution engine; this project never bills anything itself and enforces credit budgets locally.                                                                 |
+| **Unattended operation on a personal machine** | Everything is designed for the owner being far away: crash recovery, budget ceilings, approval gates over Telegram/web, startup failure notifications.                                 |
+| **Target repositories are treated as hostile** | A cloned repo can carry hooks, filter drivers, planted binaries, agent-instruction files and MCP configs. All are detected or neutralised (see §7).                                    |
+| **Never trust the AI's claims**                | Verification runs the project's own test command; advisory (read-only) agent roles are checked against git state, not trusted to obey their prompt.                                    |
 
 Runtime: Node.js ≥ 22.5 (needs `node:sqlite`), TypeScript compiled with `tsc`,
 ESM with `NodeNext` resolution (all relative imports use `.js` extensions).
@@ -73,35 +73,35 @@ interface is treated as a bug even if it works.
 
 ## 3. Module map
 
-| Path | Responsibility |
-| ---- | -------------- |
-| `src/main.ts` | Composition root: config → DB → bus → repository → approvals → runner → queue → service → optional Telegram bot → optional web server. Graceful shutdown that persists terminal task states before exit. |
-| `src/cli.ts`, `bin/remote-agent.js` | Operator CLI: `start stop status doctor models projects tasks logs test web setup install-agent`. `bin/` is the only executable entry. |
-| `src/core/config.ts` | All configuration from `.env` (via `process.loadEnvFile`). Interface flags (`TELEGRAM_ENABLED`, `WEB_ENABLED`), budgets, git policy, safety toggles. Unknown/invalid values stop startup. |
-| `src/core/taskService.ts` | The only place tasks are submitted, cancelled, retried, promoted. Owns the queue cap (20), prompt length cap, risk-gate → approval flow, retry duplicate guard. |
-| `src/core/events.ts` | `EventBus`: monotonic-seq pub/sub with a 500-event replay buffer (SSE `Last-Event-ID`). |
-| `src/core/redact.ts` | Secret redaction. The bot token and every value from project `.env` files are registered and stripped from ALL outbound text, logs and stored rows. |
-| `src/core/lock.ts`, `logger.ts` | Single-instance pid lock; JSONL file logging (redacted). |
-| `src/domain/task.ts` | Task state machine: `QUEUED → RUNNING → TESTING → COMPLETED/FAILED/CANCELLED/TIMED_OUT`, plus `WAITING_APPROVAL`; transitions validated; terminal states immutable (except retry → new task). |
-| `src/db/database.ts` | SQLite open + migrations (4). Corrupt DB is quarantined, never deleted. |
-| `src/db/taskRepository.ts` | All SQL. Atomic claim (`UPDATE … WHERE status='QUEUED'` CAS with per-project barrier in SQL), crash recovery (`recoverOrphans`), usage ledger (append-only deltas), queue ordering (`priority DESC, id ASC`), event log. Publishes to the bus on every write. |
-| `src/runner/queue.ts` | Single-process scheduler: drain loop, per-project busy set, bounded graceful stop. |
-| `src/runner/taskRunner.ts` | The task lifecycle: preflight → optional read-only explorer pass → agent session(s) with bounded retries → verification (tests/build) → optional read-only review pass → publish (commit/push with approvals). Credit/turn/time budgets enforced between and during sessions. |
-| `src/runner/preflight.ts` | Refuses to start on: merge conflicts, broken git, low disk, executable git config (filter/diff drivers), repo-supplied agent/hook/MCP config; asks approval for dirty trees; writes a checkpoint. |
-| `src/runner/publish.ts` | Stage (agent-changed files only, sensitive files excluded) → commit → optional push, each behind approvals where configured. |
-| `src/runner/stopReason.ts` | Pure decision function mapping an agent session outcome to proceed/retry/switch-model/halt — includes the "run reported no cost" fraud guard. |
-| `src/runner/promptBuilder.ts` | Prompts for implementer/explorer/reviewer roles; read-only rules; recovery context on retries. |
-| `src/orchestrator/plan.ts`, `confidence.ts` | **Deterministic** (no AI calls) task classification → role plan and budget; post-run confidence scoring deciding whether a paid review is worth it. |
-| `src/providers/` | `AgentProvider` interface + registry. `copilot.ts` delegates to the live-proven `src/copilot/*`; `claude.ts` maps the shared deny-list into Claude Code flags. `REQUIRED_CAPABILITIES` fail closed: a provider that cannot express a mandatory protection is refused. |
-| `src/copilot/` | Copilot CLI specifics: detection/launcher resolution (absolute paths, shell-free), argv building, JSONL event stream parsing, permission policy (deny-lists), child environment allow-list, custom agent install. |
-| `src/git/git.ts` | Every git invocation. Absolute git path (repo-planted `git.exe` defence), hardened env (`GIT_HARDENING`, random per-process `hooksPath`), non-destructive checkpoints via temporary `GIT_INDEX_FILE`, `detectExecutableGitConfig`. |
-| `src/security/repoScan.ts` | Scans the target repo for capability files (agents, skills, hooks, plugins, MCP/LSP config); anything naming a command is blocking; unparseable config fails closed. |
-| `src/approval/` | `ApprovalService` (in-memory waiters over persisted state; timeout; owner check) and the deterministic risk classifier. |
-| `src/telegram/` | grammY bot: auth allow-list middleware, commands, approval buttons, outbox with retry, private-chat-only. Implements `Notifier`. |
-| `src/web/` | `server.ts`: `node:http` REST + SSE + static; `auth.ts`: scrypt password file, in-memory sessions, login throttle. |
-| `web/` | Dependency-free static frontend (HTML/CSS/JS, strict CSP, `textContent`-only DOM) + PWA (manifest, service worker, generated PNG icons). |
-| `scripts/` | Windows Scheduled Task install/uninstall, live acceptance test, PWA icon generator (hand-rolled PNG encoder). |
-| `tests/` | 378 tests, `node:test`, no framework. See §9. |
+| Path                                        | Responsibility                                                                                                                                                                                                                                                                |
+| ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/main.ts`                               | Composition root: config → DB → bus → repository → approvals → runner → queue → service → optional Telegram bot → optional web server. Graceful shutdown that persists terminal task states before exit.                                                                      |
+| `src/cli.ts`, `bin/remote-agent.js`         | Operator CLI: `start stop status doctor models projects tasks logs test web setup install-agent`. `bin/` is the only executable entry.                                                                                                                                        |
+| `src/core/config.ts`                        | All configuration from `.env` (via `process.loadEnvFile`). Interface flags (`TELEGRAM_ENABLED`, `WEB_ENABLED`), budgets, git policy, safety toggles. Unknown/invalid values stop startup.                                                                                     |
+| `src/core/taskService.ts`                   | The only place tasks are submitted, cancelled, retried, promoted. Owns the queue cap (20), prompt length cap, risk-gate → approval flow, retry duplicate guard.                                                                                                               |
+| `src/core/events.ts`                        | `EventBus`: monotonic-seq pub/sub with a 500-event replay buffer (SSE `Last-Event-ID`).                                                                                                                                                                                       |
+| `src/core/redact.ts`                        | Secret redaction. The bot token and every value from project `.env` files are registered and stripped from ALL outbound text, logs and stored rows.                                                                                                                           |
+| `src/core/lock.ts`, `logger.ts`             | Single-instance pid lock; JSONL file logging (redacted).                                                                                                                                                                                                                      |
+| `src/domain/task.ts`                        | Task state machine: `QUEUED → RUNNING → TESTING → COMPLETED/FAILED/CANCELLED/TIMED_OUT`, plus `WAITING_APPROVAL`; transitions validated; terminal states immutable (except retry → new task).                                                                                 |
+| `src/db/database.ts`                        | SQLite open + migrations (4). Corrupt DB is quarantined, never deleted.                                                                                                                                                                                                       |
+| `src/db/taskRepository.ts`                  | All SQL. Atomic claim (`UPDATE … WHERE status='QUEUED'` CAS with per-project barrier in SQL), crash recovery (`recoverOrphans`), usage ledger (append-only deltas), queue ordering (`priority DESC, id ASC`), event log. Publishes to the bus on every write.                 |
+| `src/runner/queue.ts`                       | Single-process scheduler: drain loop, per-project busy set, bounded graceful stop.                                                                                                                                                                                            |
+| `src/runner/taskRunner.ts`                  | The task lifecycle: preflight → optional read-only explorer pass → agent session(s) with bounded retries → verification (tests/build) → optional read-only review pass → publish (commit/push with approvals). Credit/turn/time budgets enforced between and during sessions. |
+| `src/runner/preflight.ts`                   | Refuses to start on: merge conflicts, broken git, low disk, executable git config (filter/diff drivers), repo-supplied agent/hook/MCP config; asks approval for dirty trees; writes a checkpoint.                                                                             |
+| `src/runner/publish.ts`                     | Stage (agent-changed files only, sensitive files excluded) → commit → optional push, each behind approvals where configured.                                                                                                                                                  |
+| `src/runner/stopReason.ts`                  | Pure decision function mapping an agent session outcome to proceed/retry/switch-model/halt — includes the "run reported no cost" fraud guard.                                                                                                                                 |
+| `src/runner/promptBuilder.ts`               | Prompts for implementer/explorer/reviewer roles; read-only rules; recovery context on retries.                                                                                                                                                                                |
+| `src/orchestrator/plan.ts`, `confidence.ts` | **Deterministic** (no AI calls) task classification → role plan and budget; post-run confidence scoring deciding whether a paid review is worth it.                                                                                                                           |
+| `src/providers/`                            | `AgentProvider` interface + registry. `copilot.ts` delegates to the live-proven `src/copilot/*`; `claude.ts` maps the shared deny-list into Claude Code flags. `REQUIRED_CAPABILITIES` fail closed: a provider that cannot express a mandatory protection is refused.         |
+| `src/copilot/`                              | Copilot CLI specifics: detection/launcher resolution (absolute paths, shell-free), argv building, JSONL event stream parsing, permission policy (deny-lists), child environment allow-list, custom agent install.                                                             |
+| `src/git/git.ts`                            | Every git invocation. Absolute git path (repo-planted `git.exe` defence), hardened env (`GIT_HARDENING`, random per-process `hooksPath`), non-destructive checkpoints via temporary `GIT_INDEX_FILE`, `detectExecutableGitConfig`.                                            |
+| `src/security/repoScan.ts`                  | Scans the target repo for capability files (agents, skills, hooks, plugins, MCP/LSP config); anything naming a command is blocking; unparseable config fails closed.                                                                                                          |
+| `src/approval/`                             | `ApprovalService` (in-memory waiters over persisted state; timeout; owner check) and the deterministic risk classifier.                                                                                                                                                       |
+| `src/telegram/`                             | grammY bot: auth allow-list middleware, commands, approval buttons, outbox with retry, private-chat-only. Implements `Notifier`.                                                                                                                                              |
+| `src/web/`                                  | `server.ts`: `node:http` REST + SSE + static; `auth.ts`: scrypt password file, in-memory sessions, login throttle.                                                                                                                                                            |
+| `web/`                                      | Dependency-free static frontend (HTML/CSS/JS, strict CSP, `textContent`-only DOM) + PWA (manifest, service worker, generated PNG icons).                                                                                                                                      |
+| `scripts/`                                  | Windows Scheduled Task install/uninstall, live acceptance test, PWA icon generator (hand-rolled PNG encoder).                                                                                                                                                                 |
+| `tests/`                                    | 378 tests, `node:test`, no framework. See §9.                                                                                                                                                                                                                                 |
 
 ---
 
@@ -120,13 +120,14 @@ outbox(id, chat_id, body, ts, attempts)               -- undeliverable messages
 ```
 
 Key semantics:
+
 - `origin` = `telegram | web` — which interface created it (display only).
 - `model` — per-task model override, honoured only if the installed CLI lists it.
 - `priority` — queue precedence; the only mutation is "move to front".
 - `result_json` holds `filesChanged, linesAdded/Removed, verifications[]
-  (command, exit, output tail), summary` — where `summary` is the agent's own
+(command, exit, output tail), summary` — where `summary` is the agent's own
   final message **verbatim** (post-redaction).
-- The usage ledger stores *deltas*, so recovery/restart cannot re-bill or lose
+- The usage ledger stores _deltas_, so recovery/restart cannot re-bill or lose
   spend; daily budget = `SUM(credits) WHERE ts >= now-24h`.
 
 ---
@@ -144,7 +145,7 @@ Key semantics:
 3. **Preflight** (`prepareRepository`): disk space, git health, executable git
    config detection FIRST, repo capability scan, dirty-tree approval,
    **checkpoint** — a commit object at `refs/remote-agent/checkpoint-<id>`
-   capturing the tree *including uncommitted work*, written through a temp
+   capturing the tree _including uncommitted work_, written through a temp
    index so the user's index/tree are untouched.
 4. **Plan** (`orchestrator/plan.ts`, deterministic): simple → implementer only;
    complex → explorer (read-only survey) + implementer; security-evidence →
@@ -183,6 +184,7 @@ away.
 ## 6. Interfaces
 
 ### Telegram (`src/telegram/`)
+
 - Long polling (outbound-only; no open ports). Numeric user-id allow-list;
   everyone else gets one line. Private chats only. Update idempotency via
   `processed_updates`. Outbox queue for undeliverable messages (bounded).
@@ -194,6 +196,7 @@ away.
   shutdown).
 
 ### Web (`src/web/` + `web/`)
+
 - `node:http` only. REST + **SSE** (`/api/events`, `Last-Event-ID` replay) —
   deliberately no WebSocket dependency.
 - Auth: one operator, scrypt-hashed password file created by
@@ -222,19 +225,19 @@ The target repository is hostile input. Verified-by-exploit defences (each was
 demonstrated against an earlier build, then fixed, with regression tests in
 `tests/redteam.test.ts` / `tests/hardening.test.ts`):
 
-| Attack | Defence |
-| ------ | ------- |
-| Repo-planted `git.exe` / `npm.cmd` shadowing the real binary (Windows searches CWD first) | git resolved to an absolute path via PATH-only search; `NoDefaultCurrentDirectoryInExePath=1` for shell lookups |
-| Git filter/diff drivers executing on *read* (checkout/diff) | `detectExecutableGitConfig` runs before any git command; presence is a hard refusal |
-| Hostile git hooks | Random per-process `core.hooksPath` override; hook changes during a run are detected as tamper |
-| Repo-supplied agent instructions (`AGENTS.md`, `.github/agents`, skills, MCP/LSP config) | `--no-custom-instructions`, `--disable-builtin-mcps`, plus `repoScan` before AND re-check after every session (the CLI reloads config per session) |
-| Credential theft via verification command | `execCommand` env REPLACES the parent env from an allow-list; the bot token never enters any child |
-| Secrets in output | Central `redact()` over every message, log line, stored row, diff |
-| cmd.exe quoting (`%~dp0` corruption breaking npm) | `cmdExeInvocation` quotes only tokens that need it — never bare program names |
-| Web: CSRF/XSS/rebinding/traversal | See §6; all covered by tests over real HTTP |
-| Provider downgrade (a CLI that can't express "deny shell(curl)") | Capability declaration + fail-closed `selectProvider()` |
+| Attack                                                                                    | Defence                                                                                                                                            |
+| ----------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Repo-planted `git.exe` / `npm.cmd` shadowing the real binary (Windows searches CWD first) | git resolved to an absolute path via PATH-only search; `NoDefaultCurrentDirectoryInExePath=1` for shell lookups                                    |
+| Git filter/diff drivers executing on _read_ (checkout/diff)                               | `detectExecutableGitConfig` runs before any git command; presence is a hard refusal                                                                |
+| Hostile git hooks                                                                         | Random per-process `core.hooksPath` override; hook changes during a run are detected as tamper                                                     |
+| Repo-supplied agent instructions (`AGENTS.md`, `.github/agents`, skills, MCP/LSP config)  | `--no-custom-instructions`, `--disable-builtin-mcps`, plus `repoScan` before AND re-check after every session (the CLI reloads config per session) |
+| Credential theft via verification command                                                 | `execCommand` env REPLACES the parent env from an allow-list; the bot token never enters any child                                                 |
+| Secrets in output                                                                         | Central `redact()` over every message, log line, stored row, diff                                                                                  |
+| cmd.exe quoting (`%~dp0` corruption breaking npm)                                         | `cmdExeInvocation` quotes only tokens that need it — never bare program names                                                                      |
+| Web: CSRF/XSS/rebinding/traversal                                                         | See §6; all covered by tests over real HTTP                                                                                                        |
+| Provider downgrade (a CLI that can't express "deny shell(curl)")                          | Capability declaration + fail-closed `selectProvider()`                                                                                            |
 
-What is *not* claimed: the shell deny-list is defence in depth, not a sandbox
+What is _not_ claimed: the shell deny-list is defence in depth, not a sandbox
 (`npm`/`pip`/`make` can run arbitrary code — that's inherent to running
 tests); read-only roles are verified via git, which cannot see writes outside
 the repo or gitignored paths. `COPILOT_SANDBOX=true` exists for real OS-level
@@ -255,7 +258,7 @@ containment (experimental upstream).
   unreported run fails the task (a schema change upstream cannot silently
   make runs "free").
 - Quota exhaustion halts cleanly with an explicit "no paid usage was enabled"
-  message. The model catalogue is treated as *not* an entitlement: runtime
+  message. The model catalogue is treated as _not_ an entitlement: runtime
   refusals trigger one model switch, then an actionable failure.
 
 ---
@@ -265,22 +268,22 @@ containment (experimental upstream).
 `npm test` = strict-config `tsc` lint + build + 378 tests (`node:test`,
 `node:assert/strict`, zero test dependencies, **zero AI calls**).
 
-| File | What it proves |
-| ---- | -------------- |
-| `e2e.test.ts` | The real runner against a **mock Copilot CLI** in temp git repos: happy path, retries, quota, cancellation, dirty-tree approval, checkpoints, orchestration roles (survey read-only, implementer writes). |
-| `redteam.test.ts` | Regressions for attacks that *worked* against earlier builds (planted binaries, filter drivers, hook injection, prompt-injected shell text, nested-CLI denial). Never weakened to make a change pass. |
-| `chaos.test.ts` | Power-cut recovery, broken git, config written mid-run, model refusal fallback, daily-budget refusal. |
-| `queue.test.ts` | Deterministic five-task FIFO with per-transition state checks, exactly-once execution, approval barrier, per-project parallelism rules, promotion, restart persistence, abandonment. |
-| `web.test.ts` | The real HTTP server: auth, CSRF, forged cookies, traversal (incl. Windows separators), Host pinning (421), cross-interface task visibility, approval resolution, SSE delivery + replay, PWA manifest/icons/SW contract. |
-| `providers.test.ts` | Capability gate refusals; Copilot argv byte-compat; Claude deny-list sharing; malformed stream safety. |
-| `hardening/orchestration/stopReason/approval/...` | Unit-level invariants for each safety subsystem. |
-| `scripts/live-acceptance.mjs` | **Manual, spends ~1 credit**: drives the real Copilot CLI end to end against a throwaway repo with a real bug; asserts checkpoint → fix → tests → commit and that the bot token never reached Telegram. The only test that catches environment/quoting faults. |
+| File                                              | What it proves                                                                                                                                                                                                                                                 |
+| ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `e2e.test.ts`                                     | The real runner against a **mock Copilot CLI** in temp git repos: happy path, retries, quota, cancellation, dirty-tree approval, checkpoints, orchestration roles (survey read-only, implementer writes).                                                      |
+| `redteam.test.ts`                                 | Regressions for attacks that _worked_ against earlier builds (planted binaries, filter drivers, hook injection, prompt-injected shell text, nested-CLI denial). Never weakened to make a change pass.                                                          |
+| `chaos.test.ts`                                   | Power-cut recovery, broken git, config written mid-run, model refusal fallback, daily-budget refusal.                                                                                                                                                          |
+| `queue.test.ts`                                   | Deterministic five-task FIFO with per-transition state checks, exactly-once execution, approval barrier, per-project parallelism rules, promotion, restart persistence, abandonment.                                                                           |
+| `web.test.ts`                                     | The real HTTP server: auth, CSRF, forged cookies, traversal (incl. Windows separators), Host pinning (421), cross-interface task visibility, approval resolution, SSE delivery + replay, PWA manifest/icons/SW contract.                                       |
+| `providers.test.ts`                               | Capability gate refusals; Copilot argv byte-compat; Claude deny-list sharing; malformed stream safety.                                                                                                                                                         |
+| `hardening/orchestration/stopReason/approval/...` | Unit-level invariants for each safety subsystem.                                                                                                                                                                                                               |
+| `scripts/live-acceptance.mjs`                     | **Manual, spends ~1 credit**: drives the real Copilot CLI end to end against a throwaway repo with a real bug; asserts checkpoint → fix → tests → commit and that the bot token never reached Telegram. The only test that catches environment/quoting faults. |
 
 ---
 
 ## 10. Configuration surface (`.env`)
 
-Required: `TELEGRAM_BOT_TOKEN` + `AUTHORIZED_TELEGRAM_USER_ID` (Telegram) *or*
+Required: `TELEGRAM_BOT_TOKEN` + `AUTHORIZED_TELEGRAM_USER_ID` (Telegram) _or_
 `WEB_ENABLED=true` + `remote-agent web setup` (web). Everything else has safe
 defaults: auto-push off, approvals on, checkpoints on, 10 credits/task,
 50/day, 30-min task limit, 1 concurrent task, protected branches
@@ -291,13 +294,14 @@ agent CLI (validated, fail-closed). See `.env.example` for every option.
 
 ## 11. Known issues and open items
 
-1. **Copilot CLI write-deny regression (verified on 1.0.79).** Any per-path
-   `--deny-tool=write(x)` rule makes the CLI deny **all** file writes; the
-   agent then reports "Blocked — I could not write any files" and completes
-   without changes. Proven by A/B probe. Status on 1.0.80 unverified (probes
-   hit transient model-availability limits). The UI shows the agent's exact
-   words, so the failure is visible, not silent. Decision pending: never
-   silently drop the write deny-list.
+1. **Copilot CLI write-deny scope (re-probed on 1.0.80).** The 1.0.79
+   regression — any per-path `--deny-tool=write(x)` rule denying **all** file
+   writes — is gone: an A/B probe on 1.0.80 created files normally with the
+   deny rules present. The durable limitation remains: `write(path)` rules
+   bind the CLI's **file tools only**. In the same probe the agent wrote the
+   denied `.env` through a shell command. The deny-list is defence in depth;
+   the checkpoint, the sensitive-file commit screen and redaction are the
+   layers that actually protect those files.
 2. **iOS PWA behaviour** follows Apple's documented metadata but has not been
    verified on physical Apple hardware.
 3. **Web push notifications** deliberately deferred (needs per-platform push
@@ -312,7 +316,7 @@ agent CLI (validated, fail-closed). See `.env.example` for every option.
 ## 12. Conventions for contributors (and AIs)
 
 - TypeScript, ESM, `NodeNext`: **always** `.js` extensions in relative imports.
-- Comments explain *why*, never *what*.
+- Comments explain _why_, never _what_.
 - Anything touching permissions, redaction, git safety, the state machine or
   approvals **must come with a test**; red-team tests are never weakened.
 - Untrusted text is argv with `shell:false`; on Windows, anything through
@@ -320,5 +324,5 @@ agent CLI (validated, fail-closed). See `.env.example` for every option.
 - Anything executing project-supplied code gets `buildChildEnv()`, never
   `process.env`; all git through `Git.run()`.
 - Interfaces stay thin; capability claims about agent CLIs must correspond to
-  verified flags on the *installed* binary — never assumed, never invented.
+  verified flags on the _installed_ binary — never assumed, never invented.
 - The full ground rules live in `AGENTS.md`.

@@ -65,6 +65,8 @@ export interface CopilotArgsOptions {
   allowRepoInstructions?: boolean;
   /** Keep the built-in GitHub MCP server enabled. */
   githubMcp?: boolean;
+  /** Resume this session instead of starting cold (follow-up tasks). */
+  resumeSessionId?: string | null;
 }
 
 export interface CopilotRunOptions {
@@ -182,6 +184,10 @@ export function buildCopilotArgs(options: CopilotArgsOptions): string[] {
   args.push('--model', options.model);
   if (options.effort) args.push('--effort', options.effort);
   if (options.agent) args.push('--agent', options.agent);
+
+  // Warm-start a previous session (follow-up tasks). Must be the explicit
+  // `--resume=<id>` form: a bare `--resume` wants a TTY picker under -p.
+  if (options.resumeSessionId) args.push(`--resume=${options.resumeSessionId}`);
 
   // A real in-process ceiling: the CLI blocks the next model call once this is
   // reached. It refuses values below its documented minimum, so smaller budgets

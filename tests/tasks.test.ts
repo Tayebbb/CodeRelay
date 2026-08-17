@@ -66,6 +66,17 @@ describe('task repository', () => {
     db.close();
   });
 
+  test('persists the follow-up link and defaults it to null', () => {
+    const { db, tasks } = repo();
+    const follow = tasks.create({ ...NEW_TASK, parentTaskId: 7, resumeSessionId: 'sess-1' });
+    assert.equal(tasks.get(follow.id)!.parentTaskId, 7);
+    assert.equal(tasks.get(follow.id)!.resumeSessionId, 'sess-1');
+    const plain = tasks.create(NEW_TASK);
+    assert.equal(tasks.get(plain.id)!.parentTaskId, null);
+    assert.equal(tasks.get(plain.id)!.resumeSessionId, null);
+    db.close();
+  });
+
   test('redacts secrets in the stored prompt', () => {
     const { db, tasks } = repo();
     const task = tasks.create({ ...NEW_TASK, prompt: 'use ghp_abcdefghijklmnopqrstuvwxyz0123456789 to fix it' });
