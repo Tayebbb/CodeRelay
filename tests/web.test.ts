@@ -19,6 +19,7 @@ import { ProjectRegistry } from '../src/projects/registry.js';
 import { ApprovalService } from '../src/approval/service.js';
 import { EventBus } from '../src/core/events.js';
 import { TaskService } from '../src/core/taskService.js';
+import { GitControlService } from '../src/core/gitControl.js';
 import { WebServer, webNotifier } from '../src/web/server.js';
 import { createPasswordFile, LoginThrottle, SessionStore, verifyPassword } from '../src/web/auth.js';
 import { nullNotifier } from '../src/notify/notifier.js';
@@ -132,6 +133,7 @@ async function startHarness(): Promise<Harness> {
 
   const approvals = new ApprovalService(tasks, webNotifier(bus), 60_000);
   const service = new TaskService({ config, tasks, projects, queue, runner, approvals, notifier: nullNotifier });
+  const gitControl = new GitControlService({ projects, tasks });
 
   const server = new WebServer({
     config,
@@ -140,6 +142,7 @@ async function startHarness(): Promise<Harness> {
     queue,
     approvals,
     service,
+    gitControl,
     copilot: COPILOT,
     bus,
     startedAt: Date.now(),
@@ -469,9 +472,14 @@ describe('web interface', () => {
       origin: 'web',
     });
     h.tasks.transition(created.id, 'RUNNING');
-    const result = h.service.followUp(created.id, { origin: 'web', userId: 0, chatId: 0, prompt: 'more' });
-    assert.equal(result.ok, false);
-    if (!result.ok) assert.match(result.error, /still RUNNING/);
+    try {
+      const result = h.service.followUp(created.id, { origin: 'web', userId: 0, chatId: 0, prompt: 'more' });
+      assert.equal(result.ok, false);
+      if (!result.ok) assert.match(result.error, /still RUNNING/);
+    } finally {
+      // A task left RUNNING would block later git-panel tests for this project.
+      h.tasks.transition(created.id, 'CANCELLED');
+    }
   });
 
   test('a follow-up on a task with no recorded session is refused', () => {
@@ -560,6 +568,64 @@ describe('web interface', () => {
     const clone = h.tasks.get(retried.taskId!)!;
     assert.equal(clone.parentTaskId, parentId);
     assert.equal(clone.resumeSessionId, 'sess-retry');
+  });
+
+  // -------------------------------------------------------------- git panel
+
+  test('git status is served for a registered project and 404s otherwise', async () => {
+    const known = await fetch(`${h.base}/api/projects/demo/git`, { headers: { Cookie: cookie } });
+    assert.equal(known.status, 200);
+    const panel = (await known.json()) as { isRepo: boolean };
+    assert.equal(panel.isRepo, false, 'the harness project is deliberately not a repository');
+
+    const unknown = await fetch(`${h.base}/api/projects/nope/git`, { headers: { Cookie: cookie } });
+    assert.equal(unknown.status, 404);
+  });
+
+  test('only the fixed git action menu is accepted', async () => {
+    const response = await fetch(`${h.base}/api/projects/demo/git`, {
+      method: 'POST',
+      headers: authed(cookie),
+      body: JSON.stringify({ action: 'reset --hard' }),
+    });
+    assert.equal(response.status, 400);
+  });
+
+  test('a git action on a non-repository is refused with the reason', async () => {
+    const response = await fetch(`${h.base}/api/projects/demo/git`, {
+      method: 'POST',
+      headers: authed(cookie),
+      body: JSON.stringify({ action: 'pull' }),
+    });
+    assert.equal(response.status, 409);
+    const body = (await response.json()) as { error: string };
+    assert.match(body.error, /not a git repository/);
+  });
+
+  test('a git action is refused while a task works in that repository', async () => {
+    const task = h.tasks.create({
+      userId: 0,
+      chatId: 0,
+      projectId: 'demo',
+      prompt: 'busy',
+      approvalRequired: false,
+      approvalReason: null,
+      origin: 'web',
+    });
+    h.tasks.transition(task.id, 'RUNNING');
+    try {
+      const response = await fetch(`${h.base}/api/projects/demo/git`, {
+        method: 'POST',
+        headers: authed(cookie),
+        body: JSON.stringify({ action: 'push' }),
+      });
+      assert.equal(response.status, 409);
+      const body = (await response.json()) as { error: string };
+      // Any live task in the project must block it — not only the one just made.
+      assert.match(body.error, /is working in this repository/);
+    } finally {
+      h.tasks.transition(task.id, 'CANCELLED');
+    }
   });
 
   // -------------------------------------------------------------- approvals

@@ -8,6 +8,7 @@ import type { TaskQueue } from '../runner/queue.js';
 import type { TaskRunner } from '../runner/taskRunner.js';
 import type { ApprovalService } from '../approval/service.js';
 import type { TaskService } from '../core/taskService.js';
+import { GIT_ACTIONS, isGitAction, type GitControlService } from '../core/gitControl.js';
 import type { ApprovalRequest, Notifier } from '../notify/notifier.js';
 import type { CopilotInfo } from '../copilot/detect.js';
 import { selectModel } from '../copilot/detect.js';
@@ -34,6 +35,7 @@ export interface TelegramBotDeps {
   runner: TaskRunner;
   approvals: ApprovalService;
   service: TaskService;
+  gitControl: GitControlService;
   copilot: CopilotInfo;
   startedAt: number;
 }
@@ -458,6 +460,54 @@ export class TelegramBot implements Notifier {
 
     this.bot.command('approve', async (ctx) => this.decide(ctx.match ?? '', 'APPROVED', ctx));
     this.bot.command('reject', async (ctx) => this.decide(ctx.match ?? '', 'REJECTED', ctx));
+
+    // /git [project] [status|fetch|pull|push|sync] — the git remote control.
+    this.bot.command('git', async (ctx) => {
+      const usage = 'Usage: /git [project] <status|fetch|pull|push|sync>';
+      const tokens = (ctx.match ?? '').trim().split(/\s+/).filter(Boolean);
+      projects.load();
+
+      let action = 'status';
+      const last = tokens.at(-1)?.toLowerCase() ?? '';
+      if (last === 'status' || isGitAction(last)) {
+        action = last;
+        tokens.pop();
+      }
+
+      const selector = tokens.join(' ');
+      let projectId: string | null = null;
+      if (selector) {
+        const resolved = projects.resolve(selector);
+        if (!resolved) return void (await ctx.reply(`No registered project matches "${truncate(selector, 40)}".`));
+        if ('ambiguous' in resolved) {
+          const names = resolved.ambiguous.map((p) => `  - ${p.name} (${p.id})`).join('\n');
+          return void (await ctx.reply(`"${truncate(selector, 40)}" matches several projects:\n${names}`));
+        }
+        projectId = resolved.project.id;
+      } else {
+        const enabled = projects.enabled();
+        if (enabled.length === 1) projectId = enabled[0]!.id;
+        else return void (await ctx.reply(`${usage}\n\n${formatProjectList(enabled)}`));
+      }
+
+      if (action === 'status') {
+        const panel = await this.deps.gitControl.status(projectId);
+        if (!panel) return void (await ctx.reply('That project is not registered.'));
+        if (!panel.isRepo) return void (await ctx.reply('This project is not a git repository.'));
+        const lines = [
+          `Git — ${projectId}`,
+          `Branch: ${panel.branch ?? 'detached'}`,
+          `Ahead ${panel.ahead} · behind ${panel.behind}${panel.hasRemote ? '' : ' (no remote)'}`,
+          panel.dirty > 0 ? `${panel.dirty} uncommitted change(s)` : 'Working tree clean',
+        ];
+        if (panel.error) lines.push(`⚠️ ${panel.error}`);
+        lines.push('', `Actions: /git ${projectId} ${GIT_ACTIONS.join(' | ')}`);
+        return void (await ctx.reply(lines.join('\n')));
+      }
+
+      const result = await this.deps.gitControl.run(projectId, action as (typeof GIT_ACTIONS)[number]);
+      await ctx.reply(`${result.ok ? '✅' : '⚠️'} ${result.message}`);
+    });
 
     this.bot.command('task', async (ctx) => {
       const parts = splitTaskCommand(ctx.match ?? '');

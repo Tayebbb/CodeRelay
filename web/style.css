@@ -373,6 +373,14 @@ button { font: inherit; cursor: pointer; color: inherit; background: none; borde
 /* Earlier turns of a follow-up thread: present but visually receded */
 .thread-past { opacity: 0.62; animation: none; }
 
+/* ---------------------------------------------------------------- git panel */
+.git-info { display: flex; flex-direction: column; gap: 2px; margin-bottom: 8px; }
+.git-branch { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.git-position { font-size: 12px; color: var(--text-dim, #9aa0a6); font-variant-numeric: tabular-nums; }
+.git-error { font-size: 12px; color: var(--danger, #e5534b); white-space: pre-wrap; }
+.git-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.git-actions .ghost-button { flex: 1 1 40%; }
+
 /* CodeRelay system events: quiet one-liners, clearly not the agent's voice */
 .sys-line {
   display: flex;

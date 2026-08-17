@@ -431,8 +431,7 @@ The part before the `:` is the project id. With a single project registered you 
 | `/logs <id>`                     | Detailed log for one task                |
 | `/cancel <id>`                   | Stop a running task                      |
 | `/retry <id>`                    | Re-run a failed task                     |
-| `/followup <id> <…>`             | Continue a finished task's agent session |
-| `/usage`                         | AI credits used                          |
+| `/followup <id> <…>`             | Continue a finished task's agent session || `/git [project] <op>`            | Git remote control: `status` `fetch` `pull` `push` `sync` || `/usage`                         | AI credits used                          |
 | `/approve <id>` · `/reject <id>` | Answer an approval by text               |
 
 ### What a run looks like
@@ -507,6 +506,11 @@ whole point is that you are away from the PC.
   the same machinery as every Telegram message.
 - **Approvals** render as cards with Approve/Reject — answered through the
   exact same gate as the Telegram buttons, never around it.
+- **Git panel.** Branch, ahead/behind and dirty count for the selected
+  project, with **Fetch / Pull / Push / Sync** buttons — a fixed menu, never
+  arbitrary git. Pull is fast-forward-only so it can never create a conflict
+  from your phone; everything is refused while an agent task is working in
+  that repository, and the same hostile-repo gates apply as for tasks.
 - **Installable (PWA).** Add it to your phone's home screen and it opens as a
   standalone app, with the shell cached for instant launches. The service
   worker never touches `/api/` — no task data, git information or session

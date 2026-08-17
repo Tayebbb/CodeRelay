@@ -28,6 +28,86 @@ after(() => {
   fs.rmSync(repoDir, { recursive: true, force: true });
 });
 
+describe('git remote control primitives', () => {
+  let base: string;
+  let origin: string;
+  let cloneA: string;
+  let cloneB: string;
+
+  async function sh(cwd: string, args: string[]) {
+    return execCommand('git', args, { cwd, shell: false, timeoutMs: 30_000 });
+  }
+
+  async function commitFile(cwd: string, name: string, content: string) {
+    fs.writeFileSync(path.join(cwd, name), content);
+    await sh(cwd, ['add', '.']);
+    await sh(cwd, ['commit', '-m', `add ${name}`]);
+  }
+
+  before(async () => {
+    base = fs.mkdtempSync(path.join(os.tmpdir(), 'rpca-remote-'));
+    origin = path.join(base, 'origin.git');
+    cloneA = path.join(base, 'a');
+    cloneB = path.join(base, 'b');
+    fs.mkdirSync(origin, { recursive: true });
+    await sh(origin, ['init', '--bare', '-b', 'main']);
+    for (const clone of [cloneA, cloneB]) {
+      await execCommand('git', ['clone', origin, clone], { cwd: base, shell: false, timeoutMs: 30_000 });
+      await sh(clone, ['config', 'user.email', 'test@example.com']);
+      await sh(clone, ['config', 'user.name', 'Test']);
+      await sh(clone, ['config', 'commit.gpgsign', 'false']);
+    }
+    await commitFile(cloneA, 'README.md', '# shared\n');
+    await sh(cloneA, ['push', 'origin', 'main']);
+    await sh(cloneB, ['pull', 'origin', 'main']);
+    await sh(cloneB, ['branch', '--set-upstream-to=origin/main', 'main']);
+  });
+
+  after(() => {
+    fs.rmSync(base, { recursive: true, force: true });
+  });
+
+  test('fetch updates tracking refs without touching the working tree', async () => {
+    await commitFile(cloneA, 'one.txt', '1\n');
+    await sh(cloneA, ['push', 'origin', 'main']);
+
+    const result = await new Git(cloneB).fetch();
+    assert.equal(result.ok, true, result.output);
+    assert.ok(!fs.existsSync(path.join(cloneB, 'one.txt')), 'fetch must not modify files');
+    const status = await new Git(cloneB).status();
+    assert.equal(status.behind, 1);
+  });
+
+  test('pull fast-forwards when possible', async () => {
+    const result = await new Git(cloneB).pullFfOnly();
+    assert.equal(result.ok, true, result.output);
+    assert.ok(fs.existsSync(path.join(cloneB, 'one.txt')));
+  });
+
+  test('pull refuses divergence instead of creating a merge or conflict', async () => {
+    await commitFile(cloneA, 'two.txt', 'from A\n');
+    await sh(cloneA, ['push', 'origin', 'main']);
+    await commitFile(cloneB, 'local.txt', 'from B\n');
+
+    const headBefore = (await sh(cloneB, ['rev-parse', 'HEAD'])).stdout.trim();
+    const result = await new Git(cloneB).pullFfOnly();
+    assert.equal(result.ok, false, 'diverged branches must not fast-forward');
+    const headAfter = (await sh(cloneB, ['rev-parse', 'HEAD'])).stdout.trim();
+    assert.equal(headAfter, headBefore, 'the local branch is untouched');
+    assert.ok(!fs.existsSync(path.join(cloneB, 'two.txt')), 'no partial merge appeared');
+    assert.ok(fs.readFileSync(path.join(cloneB, 'local.txt'), 'utf8').includes('from B'));
+  });
+
+  test('push uploads local commits', async () => {
+    await commitFile(cloneA, 'three.txt', '3\n');
+    const result = await new Git(cloneA).push('main');
+    assert.equal(result.ok, true, result.output);
+    const remoteHas = await sh(origin, ['rev-parse', 'refs/heads/main']);
+    const localHead = await sh(cloneA, ['rev-parse', 'HEAD']);
+    assert.equal(remoteHas.stdout.trim(), localHead.stdout.trim());
+  });
+});
+
 describe('git safety', () => {
   test('detects a clean repository', async () => {
     const status = await new Git(repoDir).status();

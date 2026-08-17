@@ -186,12 +186,67 @@ async function loadProjects() {
     select.append(option);
   }
   if (state.selectedProject) select.value = state.selectedProject;
-  select.onchange = () => { state.selectedProject = select.value; updateTopbarProject(); };
+  select.onchange = () => { state.selectedProject = select.value; updateTopbarProject(); void loadGitPanel(); };
   updateTopbarProject();
+  void loadGitPanel();
 }
 
 function updateTopbarProject() {
   $('topbar-project').textContent = projectName(state.selectedProject) ?? '';
+}
+
+// ------------------------------------------------------------------ git panel
+
+async function loadGitPanel() {
+  const panel = $('git-panel');
+  if (!state.selectedProject) return panel.classList.add('hidden');
+  let git;
+  try {
+    git = await api(`/api/projects/${encodeURIComponent(state.selectedProject)}/git`);
+  } catch {
+    return panel.classList.add('hidden');
+  }
+  if (!git.isRepo) return panel.classList.add('hidden');
+
+  panel.classList.remove('hidden');
+  const info = $('git-info');
+  info.replaceChildren();
+  const branch = document.createElement('div');
+  branch.className = 'git-branch';
+  branch.textContent = git.branch ?? 'detached HEAD';
+  const position = document.createElement('div');
+  position.className = 'git-position';
+  position.textContent = git.hasRemote
+    ? `↑${git.ahead} ↓${git.behind}${git.dirty ? ` · ${git.dirty} uncommitted` : ''}`
+    : 'no remote configured';
+  info.append(branch, position);
+  if (git.error) {
+    const err = document.createElement('div');
+    err.className = 'git-error';
+    err.textContent = git.error;
+    info.append(err);
+  }
+  for (const button of document.querySelectorAll('#git-panel [data-git]')) {
+    button.disabled = !git.hasRemote || !!git.error;
+  }
+}
+
+for (const button of document.querySelectorAll('#git-panel [data-git]')) {
+  button.addEventListener('click', async () => {
+    const buttons = [...document.querySelectorAll('#git-panel [data-git]')];
+    for (const b of buttons) b.disabled = true;
+    try {
+      const result = await api(`/api/projects/${encodeURIComponent(state.selectedProject)}/git`, {
+        method: 'POST',
+        body: JSON.stringify({ action: button.dataset.git }),
+      });
+      note(result.message || 'Done.');
+    } catch (err) {
+      note(err.message, true);
+    } finally {
+      await loadGitPanel();
+    }
+  });
 }
 
 async function loadAgents() {

@@ -468,17 +468,39 @@ export class Git {
   }
 
   async push(branch: string): Promise<{ ok: boolean; output: string }> {
-    // Credential helpers stay enabled here — pushing needs them — so this is the
-    // one command the .git/config integrity gate is solely responsible for.
-    // The environment is still the allow-list: a credential helper is a command
-    // the repository can name, and it must not be handed the bot token.
-    const result = await execCommand(gitProgram(), [...GIT_HARDENING, 'push', 'origin', branch], {
+    const result = await this.remoteRun(['push', 'origin', branch]);
+    return { ok: result.code === 0, output: result.stdout + result.stderr };
+  }
+
+  /** Update remote-tracking refs; touches no local branch or file. */
+  async fetch(): Promise<{ ok: boolean; output: string }> {
+    const result = await this.remoteRun(['fetch', '--prune', 'origin']);
+    return { ok: result.code === 0, output: result.stdout + result.stderr };
+  }
+
+  /**
+   * Pull, but only when the local branch can fast-forward. `--ff-only` is the
+   * non-destructive choice: it can never create a merge, a conflict marker, or
+   * a conflicted tree — it either advances the branch or refuses cleanly.
+   */
+  async pullFfOnly(): Promise<{ ok: boolean; output: string }> {
+    const result = await this.remoteRun(['pull', '--ff-only', 'origin']);
+    return { ok: result.code === 0, output: result.stdout + result.stderr };
+  }
+
+  /**
+   * Credential helpers stay enabled here — talking to a remote needs them — so
+   * these are the commands the .git/config integrity gate is solely responsible
+   * for. The environment is still the allow-list: a credential helper is a
+   * command the repository can name, and it must not be handed the bot token.
+   */
+  private remoteRun(args: string[]): Promise<ExecResult> {
+    return execCommand(gitProgram(), [...GIT_HARDENING, ...args], {
       cwd: this.cwd,
       timeoutMs: 120_000,
       shell: false,
       env: { ...buildChildEnv(process.env, { passthrough: [] }), GIT_TERMINAL_PROMPT: '0' },
     });
-    return { ok: result.code === 0, output: result.stdout + result.stderr };
   }
 
   async hasRemote(): Promise<boolean> {

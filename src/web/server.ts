@@ -20,6 +20,7 @@ import { createLogger, errorMessage } from '../core/logger.js';
 import { redact } from '../core/redact.js';
 import type { EventBus, BusEvent } from '../core/events.js';
 import type { TaskService } from '../core/taskService.js';
+import { isGitAction, type GitControlService } from '../core/gitControl.js';
 import type { TaskRepository } from '../db/taskRepository.js';
 import type { ProjectRegistry } from '../projects/registry.js';
 import type { TaskQueue } from '../runner/queue.js';
@@ -70,6 +71,7 @@ export interface WebServerDeps {
   queue: TaskQueue;
   approvals: ApprovalService;
   service: TaskService;
+  gitControl: GitControlService;
   copilot: CopilotInfo;
   /** Startup detection results for every known provider, keyed by id. */
   providers?: Partial<Record<ProviderId, ProviderInfo>>;
@@ -219,6 +221,13 @@ export class WebServer {
           return this.json(res, result.ok ? 200 : 409, result);
         }
         if (action === 'approval' && method === 'POST') return this.handleApproval(id, req, res);
+      }
+
+      const gitMatch = /^\/api\/projects\/([A-Za-z0-9._~-]{1,64})\/git$/.exec(route);
+      if (gitMatch) {
+        const projectId = gitMatch[1]!;
+        if (method === 'GET') return this.handleGitStatus(projectId, res);
+        if (method === 'POST') return this.handleGitAction(projectId, req, res);
       }
 
       return this.json(res, 404, { error: 'Not found' });
@@ -544,6 +553,23 @@ export class WebServer {
     const result = this.deps.approvals.resolve(id, decision);
     if (result === 'not-pending') return this.json(res, 409, { error: 'No pending approval for that task' });
     this.json(res, 200, { ok: true, decision });
+  }
+
+  private async handleGitStatus(projectId: string, res: ServerResponse): Promise<void> {
+    const panel = await this.deps.gitControl.status(projectId);
+    if (!panel) return this.json(res, 404, { error: 'Project not registered' });
+    this.json(res, 200, panel);
+  }
+
+  private async handleGitAction(projectId: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const body = await this.readJson(req);
+    const action = typeof body?.action === 'string' ? body.action : '';
+    if (!isGitAction(action)) return this.json(res, 400, { error: 'action must be fetch, pull, push or sync' });
+
+    const result = await this.deps.gitControl.run(projectId, action);
+    // Failures use `error` so the frontend's api() helper surfaces the message.
+    if (!result.ok) return this.json(res, 409, { ok: false, error: result.message });
+    this.json(res, 200, { ok: true, message: result.message });
   }
 
   // --------------------------------------------------------------------- SSE

@@ -16,6 +16,7 @@ import { TelegramBot } from './telegram/bot.js';
 import { fanOutNotifier, nullNotifier, type Notifier } from './notify/notifier.js';
 import { EventBus } from './core/events.js';
 import { TaskService } from './core/taskService.js';
+import { GitControlService } from './core/gitControl.js';
 import { WebServer, webNotifier } from './web/server.js';
 import { passwordFileExists } from './web/auth.js';
 import { acquireLock, isProcessAlive } from './core/lock.js';
@@ -225,6 +226,7 @@ export async function main(): Promise<number> {
   const runner = new TaskRunner({ config, tasks, projects, notifier, approvals, copilot, providers, bus });
   const queue = new TaskQueue(tasks, runner, { maxConcurrent: config.limits.maxConcurrentTasks });
   const service = new TaskService({ config, tasks, projects, queue, runner, approvals, notifier });
+  const gitControl = new GitControlService({ projects, tasks });
 
   const bot = config.interfaces.telegram
     ? new TelegramBot({
@@ -235,6 +237,7 @@ export async function main(): Promise<number> {
         runner,
         approvals,
         service,
+        gitControl,
         copilot,
         startedAt: Date.now(),
       })
@@ -242,7 +245,7 @@ export async function main(): Promise<number> {
 
   let web: WebServer | null = null;
   if (config.interfaces.web) {
-    web = new WebServer({ config, tasks, projects, queue, approvals, service, copilot, providers, bus, startedAt: Date.now() });
+    web = new WebServer({ config, tasks, projects, queue, approvals, service, gitControl, copilot, providers, bus, startedAt: Date.now() });
   }
 
   // Approval requests reach every enabled interface; the task proceeds if at
