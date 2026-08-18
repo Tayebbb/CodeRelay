@@ -12,12 +12,16 @@ import { execCommand } from '../src/util/exec.js';
 
 let repoDir: string;
 
+// GitHub's Windows runners hand out an 8.3 short tmp path (C:\Users\RUNNER~1\...),
+// which the registry rightly refuses. Canonicalise once for every suite here.
+const TMP_ROOT = fs.realpathSync.native(os.tmpdir());
+
 async function git(args: string[]) {
   return execCommand('git', args, { cwd: repoDir, shell: false, timeoutMs: 30_000 });
 }
 
 before(async () => {
-  repoDir = path.join(os.tmpdir(), `rpca-git-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  repoDir = path.join(TMP_ROOT, `rpca-git-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   fs.mkdirSync(repoDir, { recursive: true });
   await git(['init', '-b', 'main']);
   await git(['config', 'user.email', 'test@example.com']);
@@ -49,7 +53,7 @@ describe('git remote control primitives', () => {
   }
 
   before(async () => {
-    base = fs.mkdtempSync(path.join(os.tmpdir(), 'rpca-remote-'));
+    base = fs.mkdtempSync(path.join(TMP_ROOT, 'rpca-remote-'));
     origin = path.join(base, 'origin.git');
     cloneA = path.join(base, 'a');
     cloneB = path.join(base, 'b');
@@ -118,7 +122,7 @@ describe('git controller commit', () => {
   let db: ReturnType<typeof openDatabase>;
 
   before(async () => {
-    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rpca-commit-'));
+    dir = fs.mkdtempSync(path.join(TMP_ROOT, 'rpca-commit-'));
     const repo = path.join(dir, 'work');
     fs.mkdirSync(repo);
     const sh = (args: string[]) => execCommand('git', args, { cwd: repo, shell: false, timeoutMs: 30_000 });
@@ -238,7 +242,7 @@ describe('git safety', () => {
   });
 
   test('reports non-repositories safely instead of throwing', async () => {
-    const plain = path.join(os.tmpdir(), `rpca-plain-${Date.now()}`);
+    const plain = path.join(TMP_ROOT, `rpca-plain-${Date.now()}`);
     fs.mkdirSync(plain, { recursive: true });
     const status = await new Git(plain).status();
     assert.equal(status.isRepo, false);
@@ -255,7 +259,7 @@ describe('git status parsing edge cases', () => {
   }
 
   before(async () => {
-    repo2 = path.join(os.tmpdir(), `rpca-git2-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    repo2 = path.join(TMP_ROOT, `rpca-git2-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     fs.mkdirSync(repo2, { recursive: true });
     await git2(['init', '-b', 'main']);
     await git2(['config', 'user.email', 'test@example.com']);
@@ -352,7 +356,7 @@ describe('git status parsing edge cases', () => {
   });
 
   test('detects unmerged paths so a conflicted repo is never reported clean', async () => {
-    const conflict = path.join(os.tmpdir(), `rpca-conflict-${Date.now()}`);
+    const conflict = path.join(TMP_ROOT, `rpca-conflict-${Date.now()}`);
     fs.mkdirSync(conflict, { recursive: true });
     const run = (args: string[]) => execCommand('git', args, { cwd: conflict, shell: false, timeoutMs: 30_000 });
 
