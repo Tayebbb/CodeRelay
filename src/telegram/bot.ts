@@ -43,6 +43,43 @@ export interface TelegramBotDeps {
 /** Bound on outbox pages per flush, so a huge backlog cannot spin forever. */
 const MAX_OUTBOX_PAGES = 50;
 
+/** Telegram answers that will not improve on retry: rejected token or another live poller. */
+export function isFatalTelegramError(err: unknown): boolean {
+  return err instanceof GrammyError && (err.error_code === 401 || err.error_code === 403 || err.error_code === 409);
+}
+
+export interface TelegramRetryOptions {
+  /** Default: retry transient failures forever. */
+  attempts?: number;
+  onRetry?: (attempt: number, delayMs: number, err: unknown) => void;
+  /** Test seam. */
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/** Retry transient Telegram failures with capped backoff; surface fatal ones immediately. */
+export async function telegramCallWithRetry<T>(fn: () => Promise<T>, options: TelegramRetryOptions = {}): Promise<T> {
+  const attempts = options.attempts ?? Number.POSITIVE_INFINITY;
+  const sleep = options.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
+  let delay = 2_000;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (isFatalTelegramError(err)) {
+        log.error('Telegram rejected the bot token or another instance is polling', {
+          error: redact((err as GrammyError).description),
+        });
+        throw err;
+      }
+      if (attempt >= attempts) throw err;
+      options.onRetry?.(attempt, delay, err);
+      log.warn('Telegram unreachable; retrying', { attempt, delayMs: delay, error: errorMessage(err) });
+      await sleep(delay);
+      delay = Math.min(delay * 2, 60_000);
+    }
+  }
+}
+
 export class TelegramBot implements Notifier {
   private readonly bot: Bot;
   private readonly throttle = new UnauthorizedThrottle();
@@ -176,10 +213,15 @@ export class TelegramBot implements Notifier {
   // ---------------------------------------------------------------- lifecycle
 
   async start(options: { onReady?: () => void } = {}): Promise<void> {
-    // A logon-triggered start often races the network coming up, so a transient
-    // failure must not kill the process into a restart loop. A 401 is fatal and
-    // is reported as such rather than retried forever.
-    const me = await this.callWithRetry(() => this.bot.api.getMe());
+    // A logon-triggered start often races the network coming up, so transient
+    // failures are retried FOREVER: a boot without internet must yield a bot
+    // that appears when the network does, not a dead process that takes the
+    // healthy web interface down with it. A 401/403 is fatal and surfaces.
+    const me = await telegramCallWithRetry(() => this.bot.api.getMe(), {
+      onRetry: () => {
+        this.connection = 'RECONNECTING';
+      },
+    });
     this.connection = 'CONNECTED';
     this.lastApiOkAt = Date.now();
     log.info('Telegram bot online', { username: me.username });
@@ -198,30 +240,6 @@ export class TelegramBot implements Notifier {
         options.onReady?.();
       },
     });
-  }
-
-  /** Retry transient Telegram failures with backoff; surface fatal ones. */
-  private async callWithRetry<T>(fn: () => Promise<T>, attempts = 8): Promise<T> {
-    let delay = 2_000;
-    for (let attempt = 1; ; attempt += 1) {
-      try {
-        return await fn();
-      } catch (err) {
-        const fatal =
-          err instanceof GrammyError && (err.error_code === 401 || err.error_code === 403 || err.error_code === 409);
-        if (fatal) {
-          log.error('Telegram rejected the bot token or another instance is polling', {
-            error: redact(err.description),
-          });
-          throw err;
-        }
-        if (attempt >= attempts) throw err;
-        this.connection = 'RECONNECTING';
-        log.warn('Telegram unreachable; retrying', { attempt, delayMs: delay, error: errorMessage(err) });
-        await new Promise((resolve) => setTimeout(resolve, delay));
-        delay = Math.min(delay * 2, 60_000);
-      }
-    }
   }
 
   /**
@@ -461,20 +479,19 @@ export class TelegramBot implements Notifier {
     this.bot.command('approve', async (ctx) => this.decide(ctx.match ?? '', 'APPROVED', ctx));
     this.bot.command('reject', async (ctx) => this.decide(ctx.match ?? '', 'REJECTED', ctx));
 
-    // /git [project] [status|fetch|pull|push|sync] — the git remote control.
+    // /git [project] [status|fetch|pull|push|sync|commit [message]]
     this.bot.command('git', async (ctx) => {
-      const usage = 'Usage: /git [project] <status|fetch|pull|push|sync>';
+      const usage = 'Usage: /git [project] <status|fetch|pull|push|sync|commit [message]>';
       const tokens = (ctx.match ?? '').trim().split(/\s+/).filter(Boolean);
       projects.load();
 
-      let action = 'status';
-      const last = tokens.at(-1)?.toLowerCase() ?? '';
-      if (last === 'status' || isGitAction(last)) {
-        action = last;
-        tokens.pop();
-      }
+      // The first action-word splits the line: project before it, and — for
+      // commit — a free-text commit message after it.
+      const actionIndex = tokens.findIndex((t) => t.toLowerCase() === 'status' || isGitAction(t.toLowerCase()));
+      const action = actionIndex >= 0 ? tokens[actionIndex]!.toLowerCase() : 'status';
+      const selector = (actionIndex >= 0 ? tokens.slice(0, actionIndex) : tokens).join(' ');
+      const commitMessage = actionIndex >= 0 ? tokens.slice(actionIndex + 1).join(' ') : '';
 
-      const selector = tokens.join(' ');
       let projectId: string | null = null;
       if (selector) {
         const resolved = projects.resolve(selector);
@@ -505,7 +522,9 @@ export class TelegramBot implements Notifier {
         return void (await ctx.reply(lines.join('\n')));
       }
 
-      const result = await this.deps.gitControl.run(projectId, action as (typeof GIT_ACTIONS)[number]);
+      const result = await this.deps.gitControl.run(projectId, action as (typeof GIT_ACTIONS)[number], {
+        message: commitMessage || undefined,
+      });
       await ctx.reply(`${result.ok ? '✅' : '⚠️'} ${result.message}`);
     });
 

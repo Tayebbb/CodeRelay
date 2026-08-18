@@ -120,6 +120,11 @@ options, in order of recommendation:
    city, on any connection. The Telegram interface needs none of this: the
    bot polls outward, so it works remotely with zero network setup.
 
+   The Tailscale address only exists once its adapter is up, which can be
+   seconds to minutes after logon. The agent waits for it: when the bind
+   fails because the address is not assigned yet, it keeps retrying (and
+   tells you over Telegram) instead of exiting.
+
 2. **SSH tunnel:** `ssh -L 8787:127.0.0.1:8787 you@home-pc` from the machine
    you are on, then browse `localhost:8787`.
 3. **LAN only:** set `WEB_HOST` to your LAN address for use at home.
@@ -131,9 +136,9 @@ the same machine and keep the hop on loopback.
 ## Troubleshooting
 
 | Symptom                                                | Fix                                                                   |
-| ------------------------------------------------------ | --------------------------------------------------------------------- |
+| ------------------------------------------------------ | --------------------------------------------------------------------- | --- | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `The web interface is enabled but has no password yet` | `npm run agent -- web setup`                                          |
 | Signed out unexpectedly                                | The agent restarted — sessions are memory-only, sign in again         |
 | `Too many attempts`                                    | Wait 15 minutes; the login throttle has closed                        |
 | Page loads, data never appears                         | You are opening a different host/port than the one printed at startup |
-| Live updates stop after a network change               | The page reconnects automatically; give it a few seconds or reload    |
+| Live updates stop after a network change               | The page reconnects automatically; give it a few seconds or reload    |     | Unreachable after a reboot until you restart the agent | Re-register the startup task once: `npm run agent -- startup install` — older installs died for good when the agent started before the VPN adapter was up |

@@ -27,8 +27,15 @@ const MAX_LOG_AGE_DAYS = 30;
 export function configureLogger(options: { level?: LogLevel; directory?: string }): void {
   if (options.level) minLevel = options.level;
   if (options.directory) {
-    mkdirSync(options.directory, { recursive: true });
-    logDirectory = options.directory;
+    try {
+      mkdirSync(options.directory, { recursive: true });
+      logDirectory = options.directory;
+    } catch (err) {
+      // Availability over audit trail: an unusable log directory must not keep
+      // the agent (and both interfaces) from starting.
+      logDirectory = null;
+      console.error(`Log directory unusable (${String(err)}); continuing with console logging only`);
+    }
     currentDay = null;
     activeFile = null;
     pruneOldLogs();

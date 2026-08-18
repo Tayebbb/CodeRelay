@@ -109,9 +109,11 @@ interface Harness {
   kicks: number[];
 }
 
-async function startHarness(): Promise<Harness> {
-  const workspace = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'coderelay-web-'));
-  const config = testConfig(workspace);
+function buildHarness(
+  workspace: string,
+  config: AppConfig,
+  extras: { bindRetryDelaysMs?: number[] } = {},
+): Omit<Harness, 'base'> {
   createPasswordFile(config.web.authFile, PASSWORD);
 
   const bus = new EventBus();
@@ -146,9 +148,24 @@ async function startHarness(): Promise<Harness> {
     copilot: COPILOT,
     bus,
     startedAt: Date.now(),
+    ...extras,
   });
-  await server.start();
-  return { base: server.address(), server, tasks, service, approvals, bus, workspace, db, kicks };
+  return { server, tasks, service, approvals, bus, workspace, db, kicks };
+}
+
+async function startHarness(): Promise<Harness> {
+  const workspace = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'coderelay-web-'));
+  const h = buildHarness(workspace, testConfig(workspace));
+  await h.server.start();
+  return { ...h, base: h.server.address() };
+}
+
+async function waitFor(cond: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error('condition not met in time');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 async function login(harness: Harness): Promise<string> {
@@ -316,6 +333,21 @@ describe('web interface', () => {
   });
 
   // ----------------------------------------------------------- shared core
+
+  test('an oversized request body cannot wedge the server', async () => {
+    // 80 KB exceeds MAX_BODY_BYTES (64 KB); the server destroys the upload.
+    const big = JSON.stringify({ projectId: 'demo', prompt: 'x'.repeat(80 * 1024) });
+    const response = await fetch(`${h.base}/api/tasks`, {
+      method: 'POST',
+      headers: authed(cookie),
+      body: big,
+    }).catch(() => null); // a mid-upload socket destroy surfaces as a fetch error
+    if (response) assert.equal(response.status, 400);
+
+    // The behavioural claim: the server survives and keeps answering.
+    const after = await fetch(`${h.base}/api/me`, { headers: authed(cookie) });
+    assert.equal(after.status, 200);
+  });
 
   test('a task created via the web lands in the same repository Telegram reads', async () => {
     const response = await fetch(`${h.base}/api/tasks`, {
@@ -758,5 +790,86 @@ describe('web auth primitives', () => {
     assert.equal(throttle.allowed('ip'), true);
     assert.equal(throttle.allowed('ip'), false);
     assert.equal(throttle.allowed('other-ip'), true);
+  });
+});
+
+// ------------------------------------------------------------- bind resilience
+//
+// The agent used to die for good when it lost the logon race against the VPN
+// adapter (WEB_HOST not assigned yet). These tests pin the survival behavior
+// with a genuinely occupied port — the same errno class, deterministically.
+
+describe('web bind resilience', () => {
+  test('a held port is waited out and the server binds once it frees', async () => {
+    const workspace = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'coderelay-bind-'));
+    const blocker = http.createServer();
+    await new Promise<void>((resolve) => blocker.listen(0, '127.0.0.1', () => resolve()));
+    const port = (blocker.address() as { port: number }).port;
+
+    const config = testConfig(workspace);
+    config.web.port = port;
+    const h = buildHarness(workspace, config, { bindRetryDelaysMs: [25] });
+    const waiting: string[] = [];
+    const recovered: string[] = [];
+    try {
+      const started = h.server.start({
+        onWaiting: (message) => waiting.push(message),
+        onRecovered: (message) => recovered.push(message),
+      });
+      await waitFor(() => waiting.length > 0);
+      assert.match(waiting[0]!, /EADDRINUSE/);
+      assert.equal(waiting.length, 1, 'the operator is told once, not once per attempt');
+
+      await new Promise<void>((resolve) => blocker.close(() => resolve()));
+      assert.equal(await started, 'listening');
+      assert.equal(recovered.length, 1, 'recovery is announced');
+
+      const response = await fetch(`http://127.0.0.1:${port}/api/me`);
+      assert.equal(response.status, 401, 'the late-bound server serves (and still requires auth)');
+    } finally {
+      await h.server.stop();
+      h.db.close();
+      if (blocker.listening) await new Promise<void>((resolve) => blocker.close(() => resolve()));
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  test('stop() during the bind wait ends the retry loop immediately', async () => {
+    const workspace = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'coderelay-bind-'));
+    const blocker = http.createServer();
+    await new Promise<void>((resolve) => blocker.listen(0, '127.0.0.1', () => resolve()));
+    const port = (blocker.address() as { port: number }).port;
+
+    const config = testConfig(workspace);
+    config.web.port = port;
+    // A long delay proves stop() wakes the wait rather than sitting it out.
+    const h = buildHarness(workspace, config, { bindRetryDelaysMs: [60_000] });
+    try {
+      const waiting: string[] = [];
+      const started = h.server.start({ onWaiting: (message) => waiting.push(message) });
+      await waitFor(() => waiting.length > 0);
+      await h.server.stop();
+      assert.equal(await started, 'stopped');
+    } finally {
+      h.db.close();
+      await new Promise<void>((resolve) => blocker.close(() => resolve()));
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  test('a non-transient bind error still fails fast', async () => {
+    const workspace = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'coderelay-bind-'));
+    const config = testConfig(workspace);
+    config.web.host = 'no-such-host.invalid'; // guaranteed unresolvable (RFC 2606)
+    const h = buildHarness(workspace, config, { bindRetryDelaysMs: [10] });
+    const waiting: string[] = [];
+    try {
+      await assert.rejects(h.server.start({ onWaiting: (message) => waiting.push(message) }));
+      assert.equal(waiting.length, 0, 'a fatal error must not pretend to be a wait');
+    } finally {
+      await h.server.stop();
+      h.db.close();
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
   });
 });

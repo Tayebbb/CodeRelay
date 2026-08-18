@@ -42,6 +42,24 @@ const MAX_DIFF_BYTES = 200 * 1024;
 const SSE_HEARTBEAT_MS = 25_000;
 
 /**
+ * Backoff between bind attempts; the last delay repeats forever.
+ *
+ * A VPN address (Tailscale is the documented remote-access path) appears
+ * seconds to minutes after logon, and the startup task routinely wins that
+ * race. Treating the race as fatal left the agent dead until someone at the
+ * PC restarted it — the exact failure this schedule exists to absorb.
+ */
+const BIND_RETRY_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 30_000, 60_000];
+
+/**
+ * Bind failures that resolve on their own: the address is not assigned yet
+ * (adapter still starting), the port is briefly held (predecessor dying, or a
+ * Windows excluded-port range that shifts at boot). Anything else is a real
+ * fault and must fail fast.
+ */
+const TRANSIENT_BIND_CODES = new Set(['EADDRNOTAVAIL', 'EADDRINUSE', 'EACCES']);
+
+/**
  * Chat modes shape the prompt on the SERVER so the orchestrator (which already
  * keys off wording for complexity and review decisions) sees the intent. The
  * frontend sends only the mode name.
@@ -77,6 +95,15 @@ export interface WebServerDeps {
   providers?: Partial<Record<ProviderId, ProviderInfo>>;
   bus: EventBus;
   startedAt: number;
+  /** Test hook: overrides the bind retry backoff schedule. */
+  bindRetryDelaysMs?: number[];
+}
+
+export interface WebStartHooks {
+  /** Called once, on the first failed bind attempt. */
+  onWaiting?: (message: string) => void;
+  /** Called when a bind that had to wait finally succeeds. */
+  onRecovered?: (message: string) => void;
 }
 
 /**
@@ -106,6 +133,9 @@ export class WebServer {
   private readonly staticRoot = path.join(PROJECT_ROOT, 'web');
   private heartbeat: NodeJS.Timeout | null = null;
   private unsubscribe: (() => void) | null = null;
+  private stopping = false;
+  private retryTimer: NodeJS.Timeout | null = null;
+  private wakeRetry: (() => void) | null = null;
   /** Availability of non-active providers, probed once on first request. */
   private providerCache: Array<Record<string, unknown>> | null = null;
 
@@ -123,7 +153,14 @@ export class WebServer {
     this.server.headersTimeout = 30_000;
   }
 
-  async start(): Promise<void> {
+  /**
+   * Resolves 'listening' once bound, or 'stopped' if stop() ends the wait.
+   * Transient bind failures are retried forever: the configured address may
+   * simply not exist yet (VPN adapter still starting after logon), and dying
+   * over it strands the operator with no interface at all. Everything else
+   * rejects immediately.
+   */
+  async start(hooks: WebStartHooks = {}): Promise<'listening' | 'stopped'> {
     const { host, port, authFile } = this.deps.config.web;
     if (!passwordFileExists(authFile)) {
       throw new Error(
@@ -133,21 +170,84 @@ export class WebServer {
 
     this.unsubscribe = this.deps.bus.subscribe((event) => this.broadcast(event));
     this.heartbeat = setInterval(() => {
-      for (const client of this.sseClients) client.write(': keepalive\n\n');
+      for (const client of this.sseClients) {
+        // A socket can die between its last write and its 'close' event; a
+        // throw here would take down the whole process via uncaughtException.
+        try {
+          client.write(': keepalive\n\n');
+        } catch {
+          this.sseClients.delete(client);
+        }
+      }
     }, SSE_HEARTBEAT_MS);
     this.heartbeat.unref?.();
 
-    await new Promise<void>((resolve, reject) => {
-      this.server.once('error', reject);
-      this.server.listen(port, host, () => {
-        this.server.removeListener('error', reject);
+    const delays = this.deps.bindRetryDelaysMs ?? BIND_RETRY_DELAYS_MS;
+    for (let attempt = 0; ; attempt++) {
+      if (this.stopping) return 'stopped';
+      try {
+        await this.listenOnce(port, host);
+      } catch (err) {
+        if (this.stopping) return 'stopped';
+        const code = (err as NodeJS.ErrnoException).code ?? '';
+        if (!TRANSIENT_BIND_CODES.has(code)) throw err;
+        if (attempt === 0) hooks.onWaiting?.(this.waitingMessage(host, port, code));
+        if (attempt % 10 === 0) {
+          log.warn('Web interface bind failed; retrying', { host, port, code, attempt: attempt + 1 });
+        }
+        const delay = delays[Math.min(attempt, delays.length - 1)] ?? 60_000;
+        // Deliberately not unref'd: in web-only mode this timer is what keeps
+        // the process alive while it waits for the address to appear.
+        await new Promise<void>((resolve) => {
+          this.wakeRetry = resolve;
+          this.retryTimer = setTimeout(resolve, delay);
+        });
+        if (this.retryTimer) clearTimeout(this.retryTimer);
+        this.retryTimer = null;
+        this.wakeRetry = null;
+        continue;
+      }
+      if (this.stopping) return 'stopped';
+      log.info('Web interface listening', { host, port, attempts: attempt + 1 });
+      if (attempt > 0) {
+        hooks.onRecovered?.(`The web interface is up at ${this.address()} (bound on attempt ${attempt + 1}).`);
+      }
+      return 'listening';
+    }
+  }
+
+  private waitingMessage(host: string, port: number, code: string): string {
+    const why =
+      code === 'EADDRNOTAVAIL'
+        ? `${host} is not an address of this PC right now — if it belongs to a VPN such as Tailscale, the adapter is probably still starting`
+        : code === 'EADDRINUSE'
+          ? `something else is currently holding port ${port}`
+          : 'the OS refused the bind';
+    return `The web interface cannot listen on ${host}:${port} yet (${code}: ${why}). It will keep retrying and come up on its own.`;
+  }
+
+  private listenOnce(port: number, host: string): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const onError = (err: Error) => {
+        this.server.removeListener('listening', onListening);
+        reject(err);
+      };
+      const onListening = () => {
+        this.server.removeListener('error', onError);
         resolve();
-      });
+      };
+      this.server.once('error', onError);
+      this.server.once('listening', onListening);
+      this.server.listen(port, host);
     });
-    log.info('Web interface listening', { host, port });
   }
 
   async stop(): Promise<void> {
+    this.stopping = true;
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+    this.wakeRetry?.();
+    this.wakeRetry = null;
     this.unsubscribe?.();
     if (this.heartbeat) clearInterval(this.heartbeat);
     for (const client of this.sseClients) client.end();
@@ -564,9 +664,10 @@ export class WebServer {
   private async handleGitAction(projectId: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
     const body = await this.readJson(req);
     const action = typeof body?.action === 'string' ? body.action : '';
-    if (!isGitAction(action)) return this.json(res, 400, { error: 'action must be fetch, pull, push or sync' });
+    if (!isGitAction(action)) return this.json(res, 400, { error: 'action must be fetch, pull, push, sync or commit' });
+    const message = typeof body?.message === 'string' ? body.message : undefined;
 
-    const result = await this.deps.gitControl.run(projectId, action);
+    const result = await this.deps.gitControl.run(projectId, action, { message });
     // Failures use `error` so the frontend's api() helper surfaces the message.
     if (!result.ok) return this.json(res, 409, { ok: false, error: result.message });
     this.json(res, 200, { ok: true, message: result.message });

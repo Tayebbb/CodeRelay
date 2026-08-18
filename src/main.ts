@@ -168,7 +168,10 @@ export async function main(): Promise<number> {
   if (!lock.acquired) {
     // Deliberately NOT reported to Telegram: the instance already running is
     // the one that will answer, and a message per restart attempt is noise.
+    // It must reach the log file though — under the scheduled task there is
+    // no console for anyone to read.
     console.error(`\nAnother agent instance is already running (pid ${lock.heldBy?.pid}).\n`);
+    log.error('Refusing to start: another instance holds the lock', { pid: lock.heldBy?.pid ?? null });
     return 5;
   }
 
@@ -357,21 +360,54 @@ export async function main(): Promise<number> {
     .filter(Boolean)
     .join('\n');
 
-  // The web server starts first: it has no external dependency and must be
-  // reachable even when Telegram (or the network to it) is down.
+  // The web server starts first but must never hold Telegram hostage: a bind
+  // the OS cannot satisfy yet (the Tailscale adapter is still starting when
+  // the logon task runs) is waited out in the background while the rest of
+  // the agent comes up. Only a non-transient bind error is fatal.
   if (web) {
-    try {
-      await web.start();
-      console.log(`\nWeb interface: ${web.address()}\n`);
-    } catch (err) {
-      await shutdown('web-start-failed', 7);
-      return await abort(7, `The web interface could not start: ${errorMessage(err)}`);
-    }
+    const webServer = web;
+    void webServer
+      .start({
+        onWaiting: (message) => {
+          log.warn(message);
+          void notifyOperatorsDirect(config, `⚠️ ${message}`);
+        },
+        onRecovered: (message) => {
+          log.info(message);
+          void notifyOperatorsDirect(config, `✅ ${message}`);
+        },
+      })
+      .then((outcome) => {
+        if (outcome === 'listening') console.log(`\nWeb interface: ${webServer.address()}\n`);
+      })
+      .catch(async (err) => {
+        // Notify BEFORE shutdown: shutdown() exits the process, so anything
+        // sequenced after it never runs. This exact ordering once made bind
+        // failures silent — no errno in the log, no message to the operator,
+        // just a dead agent until someone restarted it at the PC.
+        const message = `The web interface could not start: ${errorMessage(err)}`;
+        console.error(`\n${message}\n`);
+        log.error('Refusing to run without the web interface', { error: errorMessage(err) });
+        await notifyOperatorsDirect(config, `🚫 The coding agent is stopping.\n\n${message}`);
+        void shutdown('web-start-failed', 7);
+      });
   }
 
   if (bot) {
-    // Sent after polling starts so it is not lost when the network is not up yet.
-    await bot.start({ onReady: () => void bot.notifyOperators(banner).catch(() => {}) });
+    try {
+      // Sent after polling starts so it is not lost when the network is not up yet.
+      await bot.start({ onReady: () => void bot.notifyOperators(banner).catch(() => {}) });
+    } catch (err) {
+      // Only fatal Telegram errors surface here (revoked token, another poller);
+      // transient trouble is retried inside start() forever. Notify BEFORE
+      // shutdown — shutdown() exits the process. Without this catch the
+      // rejection reached the entry handler: console-only, no log, no cleanup.
+      const message = `The Telegram interface stopped fatally: ${errorMessage(err)}`;
+      console.error(`\n${message}\n`);
+      log.error('Refusing to run without Telegram', { error: errorMessage(err) });
+      await notifyOperatorsDirect(config, `🚫 ${message}`);
+      await shutdown('telegram-failed', 8);
+    }
   } else {
     log.info('Telegram interface disabled');
     // Without Telegram the process has no grammY loop to hold it open; the web

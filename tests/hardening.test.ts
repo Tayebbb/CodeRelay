@@ -15,6 +15,9 @@ import { buildPermissionPolicy, DEFAULT_DENIED_URLS, DEFAULT_DENIED_WRITES } fro
 import { mergeUsage, normaliseShutdownUsage } from '../src/copilot/events.js';
 import { execCommand } from '../src/util/exec.js';
 import { clearRegisteredSecrets, redact } from '../src/core/redact.js';
+import { isFatalTelegramError, telegramCallWithRetry } from '../src/telegram/bot.js';
+import { configureLogger } from '../src/core/logger.js';
+import { GrammyError } from 'grammy';
 
 function tmpDir(tag: string): string {
   const dir = path.join(
@@ -396,6 +399,84 @@ describe('single-instance lock', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  // Regression: a reboot leaves agent.pid behind and Windows recycles the pid
+  // to another node.exe (same executable path). The agent must never conclude
+  // "already running" from a lock that predates the current boot — this was a
+  // confirmed real-world permanent lockout (exit 5, which the supervisor
+  // correctly does not restart).
+  test('reclaims a pre-boot lock even when its pid is alive under the same binary', () => {
+    const dir = tmpDir('lock5');
+    const file = path.join(dir, 'agent.pid');
+    fs.writeFileSync(file, JSON.stringify({ pid: process.pid, startedAt: Date.now() - 86_400_000, exec: process.execPath }));
+    const dayOld = new Date(Date.now() - 86_400_000);
+    fs.utimesSync(file, dayOld, dayOld);
+
+    // "The machine booted an hour ago": the day-old lock cannot have an owner.
+    const result = acquireLock(file, { uptimeMs: () => 60 * 60_000 });
+    assert.equal(result.acquired, true, 'a pre-boot lock must be reclaimed');
+    result.release();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('reclaims a silent lock within one boot (recycled pid, no heartbeat)', () => {
+    const dir = tmpDir('lock6');
+    const file = path.join(dir, 'agent.pid');
+    fs.writeFileSync(file, JSON.stringify({ pid: process.pid, startedAt: Date.now() - 20 * 60_000, exec: process.execPath }));
+    const stale = new Date(Date.now() - 20 * 60_000);
+    fs.utimesSync(file, stale, stale);
+
+    // Machine up for a week, lock silent for 20 minutes: a live owner would
+    // have touched it every 30 seconds.
+    const result = acquireLock(file, { uptimeMs: () => 7 * 24 * 60 * 60_000 });
+    assert.equal(result.acquired, true, 'a lock nobody heartbeats is stale');
+    result.release();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('a fresh lock with a live pid is still refused (no false steals)', () => {
+    const dir = tmpDir('lock7');
+    const file = path.join(dir, 'agent.pid');
+    const owner = acquireLock(file, { uptimeMs: () => 7 * 24 * 60 * 60_000 });
+    assert.equal(owner.acquired, true);
+    const second = acquireLock(file, { uptimeMs: () => 7 * 24 * 60 * 60_000 });
+    assert.equal(second.acquired, false, 'a live, fresh lock must be honoured');
+    owner.release();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('the owner heartbeats the lock so starters can tell it is alive', async () => {
+    const dir = tmpDir('lock8');
+    const file = path.join(dir, 'agent.pid');
+    const owner = acquireLock(file, { heartbeatMs: 20 });
+    assert.equal(owner.acquired, true);
+
+    // Backdate, then wait for the heartbeat to freshen it again.
+    const old = new Date(Date.now() - 60 * 60_000);
+    fs.utimesSync(file, old, old);
+    const deadline = Date.now() + 5_000;
+    let touched = fs.statSync(file).mtimeMs;
+    while (Date.now() - touched > 10_000) {
+      if (Date.now() > deadline) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      touched = fs.statSync(file).mtimeMs;
+    }
+    assert.ok(Date.now() - touched < 10_000, 'heartbeat must refresh the lock mtime');
+
+    owner.release();
+    assert.equal(fs.existsSync(file), false, 'release removes the lock');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('garbage lock content is reclaimed, not honoured', () => {
+    const dir = tmpDir('lock9');
+    const file = path.join(dir, 'agent.pid');
+    fs.writeFileSync(file, 'not json {{{');
+    const result = acquireLock(file);
+    assert.equal(result.acquired, true);
+    result.release();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   test('does not consider absurd pids alive', () => {
     assert.equal(isProcessAlive(0), false);
     assert.equal(isProcessAlive(-1), false);
@@ -514,6 +595,89 @@ describe('project registry containment', () => {
     const dir = tmpDir('real');
     const child = path.join(dir, 'does-not-exist-yet');
     assert.equal(realPath(child), path.join(realPath(dir), 'does-not-exist-yet'));
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+// Regression: bot.start() used to give up after 8 transient failures (~3 min)
+// and the rejection killed the whole process — including a healthy web
+// interface — with no log entry and no notification. Transient trouble must be
+// retried indefinitely; only a rejected token / competing poller may surface.
+describe('telegram start retry policy', () => {
+  const transient = () => new Error('fetch failed: getaddrinfo ENOTFOUND api.telegram.org');
+  const fatal = () =>
+    new GrammyError('Call to getMe failed!', { ok: false, error_code: 401, description: 'Unauthorized' }, 'getMe', {});
+
+  test('transient failures are retried far beyond the old 8-attempt limit', async () => {
+    let calls = 0;
+    const result = await telegramCallWithRetry(
+      async () => {
+        calls += 1;
+        if (calls < 25) throw transient();
+        return 'connected';
+      },
+      { sleep: async () => {} },
+    );
+    assert.equal(result, 'connected');
+    assert.equal(calls, 25, 'a boot without internet must keep trying until the network appears');
+  });
+
+  test('a rejected token fails immediately, without retries', async () => {
+    let calls = 0;
+    await assert.rejects(
+      telegramCallWithRetry(
+        async () => {
+          calls += 1;
+          throw fatal();
+        },
+        { sleep: async () => {} },
+      ),
+      (err: unknown) => isFatalTelegramError(err),
+    );
+    assert.equal(calls, 1, 'retrying a dead token would hide a config error');
+  });
+
+  test('a finite attempt budget still surfaces the last transient error', async () => {
+    let calls = 0;
+    await assert.rejects(
+      telegramCallWithRetry(
+        async () => {
+          calls += 1;
+          throw transient();
+        },
+        { attempts: 3, sleep: async () => {} },
+      ),
+      /ENOTFOUND/,
+    );
+    assert.equal(calls, 3);
+  });
+
+  test('backoff is capped and reported through onRetry', async () => {
+    const delays: number[] = [];
+    let calls = 0;
+    await telegramCallWithRetry(
+      async () => {
+        calls += 1;
+        if (calls < 9) throw transient();
+        return 'ok';
+      },
+      { sleep: async () => {}, onRetry: (_attempt, delayMs) => delays.push(delayMs) },
+    );
+    assert.equal(Math.max(...delays), 60_000, 'backoff must cap, not grow unbounded');
+    assert.equal(delays[0], 2_000);
+  });
+});
+
+// Regression: an unusable log directory crashed startup before any interface
+// existed — availability must win over the audit trail.
+describe('logger resilience', () => {
+  test('an unusable log directory degrades to console-only instead of throwing', () => {
+    const dir = tmpDir('logdir');
+    const blocking = path.join(dir, 'occupied');
+    fs.writeFileSync(blocking, 'a file where a directory must go');
+    assert.doesNotThrow(() => configureLogger({ directory: path.join(blocking, 'logs') }));
+    // Restore a usable sink for the rest of the suite.
+    configureLogger({ directory: path.join(dir, 'logs') });
     fs.rmSync(dir, { recursive: true, force: true });
   });
 });

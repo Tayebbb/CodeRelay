@@ -4,6 +4,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Git } from '../src/git/git.js';
+import { GitControlService } from '../src/core/gitControl.js';
+import { ProjectRegistry } from '../src/projects/registry.js';
+import { TaskRepository } from '../src/db/taskRepository.js';
+import { openDatabase } from '../src/db/database.js';
 import { execCommand } from '../src/util/exec.js';
 
 let repoDir: string;
@@ -105,6 +109,61 @@ describe('git remote control primitives', () => {
     const remoteHas = await sh(origin, ['rev-parse', 'refs/heads/main']);
     const localHead = await sh(cloneA, ['rev-parse', 'HEAD']);
     assert.equal(remoteHas.stdout.trim(), localHead.stdout.trim());
+  });
+});
+
+describe('git controller commit', () => {
+  let dir: string;
+  let service: GitControlService;
+  let db: ReturnType<typeof openDatabase>;
+
+  before(async () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rpca-commit-'));
+    const repo = path.join(dir, 'work');
+    fs.mkdirSync(repo);
+    const sh = (args: string[]) => execCommand('git', args, { cwd: repo, shell: false, timeoutMs: 30_000 });
+    await sh(['init', '-b', 'main']);
+    await sh(['config', 'user.email', 'test@example.com']);
+    await sh(['config', 'user.name', 'Test']);
+    await sh(['config', 'commit.gpgsign', 'false']);
+    fs.writeFileSync(path.join(repo, 'README.md'), '# demo\n');
+    await sh(['add', '.']);
+    await sh(['commit', '-m', 'initial']);
+
+    const registryFile = path.join(dir, 'projects.json');
+    fs.writeFileSync(registryFile, JSON.stringify({ projects: [{ id: 'work', name: 'Work', path: repo }] }));
+    const projects = new ProjectRegistry(registryFile);
+    projects.load();
+    db = openDatabase(':memory:');
+    service = new GitControlService({ projects, tasks: new TaskRepository(db) });
+  });
+
+  after(() => {
+    db.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('commits dirty work but never protected files', async () => {
+    const repo = path.join(dir, 'work');
+    fs.writeFileSync(path.join(repo, 'notes.txt'), 'hello\n');
+    fs.writeFileSync(path.join(repo, '.env'), 'API_KEY=supersecret\n');
+
+    const result = await service.run('work', 'commit', { message: 'add notes' });
+    assert.equal(result.ok, true, result.message);
+    assert.match(result.message, /1 protected file\(s\) were left uncommitted/);
+
+    const shown = await execCommand('git', ['show', '--stat', 'HEAD'], { cwd: repo, shell: false, timeoutMs: 30_000 });
+    assert.ok(shown.stdout.includes('notes.txt'));
+    assert.ok(!shown.stdout.includes('.env'), 'the secret file must never enter history');
+    assert.ok(shown.stdout.includes('add notes'));
+    assert.ok(fs.existsSync(path.join(repo, '.env')), 'the secret file itself is untouched');
+  });
+
+  test('a clean tree has nothing to commit', async () => {
+    // Only the protected .env remains uncommitted from the previous test.
+    const result = await service.run('work', 'commit');
+    assert.equal(result.ok, false);
+    assert.match(result.message, /protected files|clean/);
   });
 });
 

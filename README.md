@@ -507,10 +507,12 @@ whole point is that you are away from the PC.
 - **Approvals** render as cards with Approve/Reject — answered through the
   exact same gate as the Telegram buttons, never around it.
 - **Git panel.** Branch, ahead/behind and dirty count for the selected
-  project, with **Fetch / Pull / Push / Sync** buttons — a fixed menu, never
-  arbitrary git. Pull is fast-forward-only so it can never create a conflict
-  from your phone; everything is refused while an agent task is working in
-  that repository, and the same hostile-repo gates apply as for tasks.
+  project, with **Fetch / Pull / Commit / Push / Sync** buttons — a fixed
+  menu, never arbitrary git. Pull is fast-forward-only so it can never create
+  a conflict from your phone, Commit stages everything except protected files
+  (`.env` and friends are never committed), everything is refused while an
+  agent task is working in that repository, and the same hostile-repo gates
+  apply as for tasks.
 - **Installable (PWA).** Add it to your phone's home screen and it opens as a
   standalone app, with the shell cached for instant launches. The service
   worker never touches `/api/` — no task data, git information or session

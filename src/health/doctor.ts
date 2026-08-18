@@ -150,6 +150,26 @@ function checkDatabase(config: AppConfig): CheckResult {
   }
 }
 
+function checkWebHost(config: AppConfig): CheckResult {
+  const name = 'Web interface';
+  if (!config.interfaces.web) return { name, status: 'skip', detail: 'disabled (WEB_ENABLED is not true)' };
+  const host = config.web.host.toLowerCase();
+  const where = `${config.web.host}:${config.web.port}`;
+  if (host === '0.0.0.0' || host === '::' || host === 'localhost' || host === '127.0.0.1' || host === '::1') {
+    return { name, status: 'pass', detail: `binds ${where}` };
+  }
+  const assigned = Object.values(os.networkInterfaces())
+    .flatMap((addresses) => addresses ?? [])
+    .some((iface) => iface.address.toLowerCase() === host);
+  if (assigned) return { name, status: 'pass', detail: `binds ${where} (address is assigned to this PC)` };
+  return {
+    name,
+    status: 'warn',
+    detail: `${config.web.host} is not an address of this PC right now`,
+    hint: 'A VPN address (Tailscale) appears once its adapter is up — the agent retries the bind until then. A typo here would make it wait forever.',
+  };
+}
+
 async function checkProjects(config: AppConfig): Promise<CheckResult[]> {
   const registry = new ProjectRegistry(config.storage.projectsFile);
   try {
@@ -346,6 +366,7 @@ export async function runDoctor(): Promise<DoctorReport> {
     results.push(await checkTelegram(config));
     results.push(checkFilesystem(config));
     results.push(checkDatabase(config));
+    results.push(checkWebHost(config));
     results.push(...(await checkProjects(config)));
   }
 

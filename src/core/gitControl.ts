@@ -15,14 +15,18 @@
 import { detectExecutableGitConfig, Git } from '../git/git.js';
 import type { ProjectRecord, ProjectRegistry } from '../projects/registry.js';
 import type { TaskRepository } from '../db/taskRepository.js';
-import { redact } from './redact.js';
+import { isSensitiveFile, redact } from './redact.js';
 import { tailLines } from '../util/exec.js';
 import { createLogger } from './logger.js';
 
 const log = createLogger('git-control');
 
-export const GIT_ACTIONS = ['fetch', 'pull', 'push', 'sync'] as const;
+export const GIT_ACTIONS = ['fetch', 'pull', 'push', 'sync', 'commit'] as const;
 export type GitAction = (typeof GIT_ACTIONS)[number];
+
+/** Operator-supplied commit messages are capped, single-purpose strings. */
+const MAX_COMMIT_MESSAGE = 200;
+const DEFAULT_COMMIT_MESSAGE = 'Operator commit via CodeRelay';
 
 export function isGitAction(value: string): value is GitAction {
   return (GIT_ACTIONS as readonly string[]).includes(value);
@@ -80,7 +84,7 @@ export class GitControlService {
     };
   }
 
-  async run(projectId: string, action: GitAction): Promise<GitResult> {
+  async run(projectId: string, action: GitAction, options: { message?: string } = {}): Promise<GitResult> {
     const project = this.project(projectId);
     if (!project) return { ok: false, message: 'That project is not registered.' };
 
@@ -102,7 +106,10 @@ export class GitControlService {
     try {
       const git = new Git(project.path);
       if (!(await git.isRepository())) return { ok: false, message: 'This project is not a git repository.' };
-      if (!(await git.hasRemote())) return { ok: false, message: 'This repository has no remote configured.' };
+      // Commit is purely local; only the remote-talking actions need a remote.
+      if (action !== 'commit' && !(await git.hasRemote())) {
+        return { ok: false, message: 'This repository has no remote configured.' };
+      }
 
       log.info('Operator git action', { projectId, action });
       switch (action) {
@@ -116,6 +123,8 @@ export class GitControlService {
           return await this.pull(git);
         case 'push':
           return await this.push(git);
+        case 'commit':
+          return await this.commit(git, options.message);
         case 'sync': {
           const pulled = await this.pull(git);
           if (!pulled.ok) return pulled;
@@ -155,9 +164,42 @@ export class GitControlService {
   private async push(git: Git): Promise<GitResult> {
     const status = await git.status();
     if (!status.branch) return { ok: false, message: 'Push refused: not on a branch (detached HEAD).' };
+    const dirty = status.staged.length + status.modified.length + status.untracked.length;
+    // Push moves COMMITS. Saying "nothing to push" while edits sit uncommitted
+    // reads like a lie from a phone — name the situation and the way out.
+    const hint = dirty > 0 ? ` ${dirty} uncommitted change(s) are not included — use Commit first.` : '';
     const result = await git.push(status.branch);
     if (!result.ok) return this.failure('Push failed', result.output);
-    return { ok: true, message: /everything up.to.date/i.test(result.output) ? 'Nothing to push.' : 'Pushed.' };
+    return {
+      ok: true,
+      message: (/everything up.to.date/i.test(result.output) ? 'Nothing to push.' : 'Pushed.') + hint,
+    };
+  }
+
+  /** Commit the operator's own uncommitted work — minus protected files. */
+  private async commit(git: Git, rawMessage: string | undefined): Promise<GitResult> {
+    const status = await git.status();
+    const dirty = status.staged.length + status.modified.length + status.untracked.length;
+    if (dirty === 0) return { ok: false, message: 'Nothing to commit — the working tree is clean.' };
+
+    const staged = await git.stageAll((file) => isSensitiveFile(file));
+    if (staged.length === 0 || !(await git.hasStagedChanges())) {
+      return {
+        ok: false,
+        message: 'Nothing to commit — the only changes are in protected files (like .env), which are never committed.',
+      };
+    }
+
+    const message = (rawMessage ?? '').trim().slice(0, MAX_COMMIT_MESSAGE) || DEFAULT_COMMIT_MESSAGE;
+    const result = await git.commit(message);
+    if (!result.ok) return this.failure('Commit failed', result.output);
+    const skipped = dirty - staged.length;
+    return {
+      ok: true,
+      message:
+        `Committed ${staged.length} file(s) (${result.hash?.slice(0, 8) ?? '?'}).` +
+        (skipped > 0 ? ` ${skipped} protected file(s) were left uncommitted.` : ''),
+    };
   }
 
   private failure(prefix: string, output: string): GitResult {

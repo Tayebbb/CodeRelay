@@ -227,18 +227,25 @@ async function loadGitPanel() {
     info.append(err);
   }
   for (const button of document.querySelectorAll('#git-panel [data-git]')) {
-    button.disabled = !git.hasRemote || !!git.error;
+    const needsRemote = button.dataset.git !== 'commit';
+    button.disabled = !!git.error || (needsRemote && !git.hasRemote);
   }
 }
 
 for (const button of document.querySelectorAll('#git-panel [data-git]')) {
   button.addEventListener('click', async () => {
+    const action = button.dataset.git;
+    let message;
+    if (action === 'commit') {
+      message = prompt('Commit message:', 'Update from CodeRelay');
+      if (message === null) return; // cancelled
+    }
     const buttons = [...document.querySelectorAll('#git-panel [data-git]')];
     for (const b of buttons) b.disabled = true;
     try {
       const result = await api(`/api/projects/${encodeURIComponent(state.selectedProject)}/git`, {
         method: 'POST',
-        body: JSON.stringify({ action: button.dataset.git }),
+        body: JSON.stringify({ action, ...(message ? { message } : {}) }),
       });
       note(result.message || 'Done.');
     } catch (err) {
@@ -969,6 +976,9 @@ function note(text, isError = false) {
 }
 
 async function sendTask() {
+  // Enter bypasses the button's disabled state; without this a double-press
+  // submits the same prompt twice and queues two paid tasks.
+  if ($('send-button').disabled) return;
   const prompt = promptInput.value.trim();
   if (!prompt) return;
   if (!state.selectedProject) return note('Register a project on the PC first.', true);

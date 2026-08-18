@@ -28,9 +28,17 @@ if (-not (Test-Path (Join-Path $root '.env'))) {
     Write-Warning "No .env found in $root - the agent will refuse to start until you create one."
 }
 
+# start-agent.cmd is the real supervisor: Task Scheduler's restart-on-failure
+# does NOT fire on a nonzero exit code (only on a failure to launch), so a
+# fatal startup error — e.g. binding the web UI before the VPN adapter is up —
+# used to kill the agent for good. The wrapper loop restarts it; RestartCount
+# below only covers the wrapper itself dying.
+$launcher = Join-Path $root 'scripts\start-agent.cmd'
+# Renders:  /d /s /c ""<launcher>" "<node>""  — with /s, cmd strips exactly the
+# outer quote pair, leaving both inner paths safely quoted.
 $action = New-ScheduledTaskAction `
-    -Execute $nodeExe `
-    -Argument "--no-warnings=ExperimentalWarning `"$entry`"" `
+    -Execute $env:ComSpec `
+    -Argument "/d /s /c """"$launcher"" ""$nodeExe""""" `
     -WorkingDirectory $root
 
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
@@ -61,7 +69,7 @@ Register-ScheduledTask `
 Write-Host ""
 Write-Host "Registered scheduled task '$taskName'." -ForegroundColor Green
 Write-Host "  Runs at logon as $env:USERNAME (not elevated)."
-Write-Host "  Restarts automatically every minute if it stops."
+Write-Host "  Restarts automatically if it exits unexpectedly."
 Write-Host ""
 Write-Host "Start it now with:   Start-ScheduledTask -TaskName $taskName"
 Write-Host "Check status with:   npm run agent -- status"
