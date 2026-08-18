@@ -28,6 +28,7 @@
       <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M5 15V6a2 2 0 0 1 2-2h9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
       <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
       <symbol id="i-relay" viewBox="0 0 24 24"><path d="M8 7l-4 5 4 5M16 7l4 5-4 5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/><path d="M13.5 5l-3 14" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></symbol>
+      <symbol id="i-logout" viewBox="0 0 24 24"><path d="M9 21H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M16 17l5-5-5-5M21 12H10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
     </defs>
   </svg>
 
@@ -57,7 +58,7 @@
         <span>CodeRelay</span>
       </div>
       <span id="topbar-project" class="topbar-project"></span>
-      <div class="top-status" role="status">
+      <div id="top-status" class="top-status" role="status">
         <span id="conn-dot" class="dot dot-ok" aria-hidden="true"></span>
         <span id="conn-text">Connected</span>
       </div>
@@ -65,7 +66,10 @@
         <svg class="icon theme-sun"><use href="#i-sun"/></svg>
         <svg class="icon theme-moon"><use href="#i-moon"/></svg>
       </button>
-      <button id="logout-button" class="ghost-button">Sign out</button>
+      <button id="logout-button" class="ghost-button logout-button" aria-label="Sign out">
+        <svg class="icon" aria-hidden="true"><use href="#i-logout"/></svg>
+        <span class="logout-label">Sign out</span>
+      </button>
     </header>
 
     <div class="body">
@@ -132,17 +136,19 @@
 
         <footer class="composer-wrap">
           <div class="composer glass">
-            <textarea id="prompt-input" rows="1" placeholder="Describe a coding task…" maxlength="4000" aria-label="Task description"></textarea>
+            <textarea id="prompt-input" rows="1" placeholder="Describe a coding task…" maxlength="4000" aria-label="Task description" enterkeyhint="send"></textarea>
             <div class="composer-bar">
-              <button id="followup-chip" class="chip-select hidden" type="button" title="Cancel follow-up"></button>
-              <select id="project-select" class="chip-select" aria-label="Project"></select>
-              <select id="model-select" class="chip-select" aria-label="Model"></select>
-              <div id="mode-control" class="segmented" role="radiogroup" aria-label="Mode">
-                <button type="button" data-mode="code" class="seg active" role="radio" aria-checked="true">Code</button>
-                <button type="button" data-mode="plan" class="seg" role="radio" aria-checked="false">Plan</button>
-                <button type="button" data-mode="review" class="seg" role="radio" aria-checked="false">Review</button>
-                <button type="button" data-mode="debug" class="seg" role="radio" aria-checked="false">Debug</button>
-                <button type="button" data-mode="ask" class="seg" role="radio" aria-checked="false">Ask</button>
+              <div class="composer-chips">
+                <button id="followup-chip" class="chip-select hidden" type="button" title="Cancel follow-up"></button>
+                <select id="project-select" class="chip-select" aria-label="Project"></select>
+                <div id="mode-control" class="segmented" role="radiogroup" aria-label="Mode">
+                  <button type="button" data-mode="code" class="seg active" role="radio" aria-checked="true">Code</button>
+                  <button type="button" data-mode="plan" class="seg" role="radio" aria-checked="false">Plan</button>
+                  <button type="button" data-mode="review" class="seg" role="radio" aria-checked="false">Review</button>
+                  <button type="button" data-mode="debug" class="seg" role="radio" aria-checked="false">Debug</button>
+                  <button type="button" data-mode="ask" class="seg" role="radio" aria-checked="false">Ask</button>
+                </div>
+                <select id="model-select" class="chip-select" aria-label="Model"></select>
               </div>
               <button id="send-button" class="send-button" aria-label="Send">
                 <svg class="icon send-icon"><use href="#i-send"/></svg>

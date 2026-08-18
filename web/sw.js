@@ -9,7 +9,7 @@
 'use strict';
 
 // Bump on shell changes: activate deletes older caches, forcing a refetch.
-const CACHE_NAME = 'coderelay-shell-v2';
+const CACHE_NAME = 'coderelay-shell-v3';
 
 const SHELL = [
   '/',

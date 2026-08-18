@@ -76,18 +76,28 @@
 /* ---------------------------------------------------------------- base */
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
+/* Pinned shell: the page itself can never scroll, so the iOS keyboard and
+   Safari's collapsing bottom URL bar resize the app instead of shoving it
+   upwards. All scrolling happens inside .stream and .sidebar. --vvh is kept
+   in step with visualViewport.height by app.js; 100dvh is the fallback. */
 body {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  overscroll-behavior: none;
   background: var(--bg);
   color: var(--text);
   font-family: var(--sans);
   font-size: 15px;
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
   text-rendering: optimizeLegibility;
 }
 .hidden { display: none !important; }
 .svg-defs { position: absolute; }
 button { font: inherit; cursor: pointer; color: inherit; background: none; border: none; }
+button, select, .tab { touch-action: manipulation; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
 ::selection { background: var(--accent-soft); }
 
@@ -136,7 +146,7 @@ button { font: inherit; cursor: pointer; color: inherit; background: none; borde
 .pwa-note button.primary { background: var(--accent); border-color: transparent; color: var(--on-accent); }
 
 /* ---------------------------------------------------------------- login */
-.login-view { min-height: 100dvh; display: grid; place-items: center; padding: 24px; overflow-y: auto; }
+.login-view { height: var(--vvh, 100dvh); display: grid; place-items: center; padding: 24px; overflow-y: auto; }
 .login-card {
   width: min(360px, 100%);
   border: 1px solid var(--hairline);
@@ -157,7 +167,7 @@ button { font: inherit; cursor: pointer; color: inherit; background: none; borde
   border-radius: var(--r-md);
   color: var(--text);
   padding: 12px 14px;
-  font-size: 15px;
+  font-size: 16px; /* <16px would trigger the iOS focus auto-zoom */
   outline: none;
   transition: border-color var(--t-fast) var(--ease);
 }
@@ -176,7 +186,7 @@ button { font: inherit; cursor: pointer; color: inherit; background: none; borde
 .login-error { color: var(--danger); font-size: 13.5px; min-height: 1.2em; margin: 0; }
 
 /* ---------------------------------------------------------------- shell */
-.app { height: 100dvh; display: flex; flex-direction: column; }
+.app { height: var(--vvh, 100dvh); display: flex; flex-direction: column; }
 .topbar {
   display: flex;
   align-items: center;
@@ -186,6 +196,8 @@ button { font: inherit; cursor: pointer; color: inherit; background: none; borde
      translucent status bar — and iOS home-screen apps do not reliably match
      the standalone media query, so it must be unconditional. */
   padding-top: calc(10px + env(safe-area-inset-top, 0px));
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
   border-bottom: 1px solid var(--hairline);
   z-index: 10;
 }
@@ -228,8 +240,11 @@ button { font: inherit; cursor: pointer; color: inherit; background: none; borde
   transition: color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
 }
 .ghost-button:hover { border-color: var(--hairline-strong); color: var(--text); background: var(--surface); }
-.ghost-button:active { transform: scale(0.98); }
+.ghost-button:active { transform: scale(0.98); background: var(--surface-strong); }
 .ghost-button.danger:hover { border-color: var(--danger); color: var(--danger); background: var(--danger-soft); }
+
+.logout-button { display: inline-flex; align-items: center; gap: 6px; }
+.logout-button .icon { width: 15px; height: 15px; }
 
 .body { flex: 1; display: flex; min-height: 0; }
 
@@ -240,6 +255,7 @@ button { font: inherit; cursor: pointer; color: inherit; background: none; borde
   display: flex;
   flex-direction: column;
   overflow-y: auto;
+  overscroll-behavior: contain;
   flex-shrink: 0;
   transition: margin-left var(--t-med) var(--ease);
 }
@@ -270,6 +286,7 @@ button { font: inherit; cursor: pointer; color: inherit; background: none; borde
   transition: background var(--t-fast) var(--ease);
 }
 .project-list button:hover, .task-list button:hover, .queue-list button:hover { background: var(--surface-strong); }
+.project-list button:active, .task-list button:active, .queue-list button:active { background: var(--surface-strong); }
 .project-list button.selected { background: var(--accent-soft); color: var(--accent); font-weight: 550; }
 .task-list button.selected { background: var(--surface-strong); }
 
@@ -339,13 +356,25 @@ button { font: inherit; cursor: pointer; color: inherit; background: none; borde
 .stream {
   flex: 1;
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 28px 24px;
+  padding-left: max(24px, env(safe-area-inset-left, 0px));
+  padding-right: max(24px, env(safe-area-inset-right, 0px));
   display: flex;
   flex-direction: column;
   gap: 4px;
   scroll-behavior: smooth;
 }
 .stream > * { max-width: 860px; width: 100%; margin-left: auto; margin-right: auto; }
+
+/* quiet, professional scrollbars on desktop pointers */
+.stream, .sidebar, .side-section.grow { scrollbar-width: thin; scrollbar-color: var(--hairline-strong) transparent; }
+.stream::-webkit-scrollbar, .sidebar::-webkit-scrollbar, .side-section.grow::-webkit-scrollbar { width: 8px; }
+.stream::-webkit-scrollbar-thumb, .sidebar::-webkit-scrollbar-thumb, .side-section.grow::-webkit-scrollbar-thumb {
+  background: var(--hairline-strong);
+  border-radius: 8px;
+}
+.stream::-webkit-scrollbar-track, .sidebar::-webkit-scrollbar-track, .side-section.grow::-webkit-scrollbar-track { background: transparent; }
 
 .empty-state { margin: auto; text-align: center; color: var(--text-dim); max-width: 380px; }
 .empty-mark { color: var(--text-faint); display: flex; justify-content: center; margin-bottom: 4px; }
@@ -567,7 +596,11 @@ button { font: inherit; cursor: pointer; color: inherit; background: none; borde
 .approval-buttons .reject:hover { background: var(--danger-soft); }
 
 /* ---------------------------------------------------------------- composer */
-.composer-wrap { padding: 8px 24px calc(14px + env(safe-area-inset-bottom)); }
+.composer-wrap {
+  padding: 8px 24px calc(14px + env(safe-area-inset-bottom));
+  padding-left: max(24px, env(safe-area-inset-left, 0px));
+  padding-right: max(24px, env(safe-area-inset-right, 0px));
+}
 .composer {
   max-width: 860px;
   margin: 0 auto;
@@ -575,23 +608,36 @@ button { font: inherit; cursor: pointer; color: inherit; background: none; borde
   border-radius: var(--r-xl);
   box-shadow: var(--shadow);
   padding: 6px 8px 8px;
-  transition: border-color var(--t-fast) var(--ease);
+  transition: border-color var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
 }
-.composer:focus-within { border-color: var(--hairline-strong); }
+.composer:focus-within { border-color: var(--accent); box-shadow: var(--shadow), 0 0 0 3px var(--accent-soft); }
 #prompt-input {
   width: 100%;
   background: none;
   border: none;
   color: var(--text);
   font: inherit;
-  font-size: 15px;
+  font-size: 16px; /* <16px would trigger the iOS focus auto-zoom */
   padding: 10px 12px 6px;
   resize: none;
   max-height: 180px;
   outline: none;
 }
 #prompt-input::placeholder { color: var(--text-faint); }
-.composer-bar { display: flex; gap: 8px; align-items: center; padding: 0 4px; flex-wrap: wrap; }
+.composer-bar { display: flex; gap: 8px; align-items: center; padding: 0 4px; }
+/* One tidy strip that scrolls sideways instead of wrapping into ragged rows. */
+.composer-chips {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  padding: 2px 0;
+}
+.composer-chips::-webkit-scrollbar { display: none; }
 .chip-select {
   background: var(--surface);
   border: 1px solid transparent;
@@ -600,6 +646,7 @@ button { font: inherit; cursor: pointer; color: inherit; background: none; borde
   font-size: 12.5px;
   padding: 5px 12px;
   max-width: 190px;
+  flex-shrink: 0;
   cursor: pointer;
   transition: border-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
   -webkit-appearance: none;
@@ -607,7 +654,7 @@ button { font: inherit; cursor: pointer; color: inherit; background: none; borde
 }
 .chip-select:hover { border-color: var(--hairline-strong); color: var(--text); }
 
-.segmented { display: flex; background: var(--surface); border-radius: 20px; padding: 2px; }
+.segmented { display: flex; background: var(--surface); border-radius: 20px; padding: 2px; flex-shrink: 0; }
 .seg {
   color: var(--text-faint);
   font-size: 12.5px;
@@ -655,31 +702,75 @@ button { font: inherit; cursor: pointer; color: inherit; background: none; borde
 @media (max-width: 760px) {
   .mobile-only { display: block; }
   .desktop-only { display: none; }
-  .topbar { gap: 8px; padding: 8px 10px; padding-top: calc(8px + env(safe-area-inset-top, 0px)); }
+
+  /* --- topbar: fewer, bigger targets --- */
+  .topbar {
+    gap: 4px;
+    padding: 6px 8px;
+    padding-top: calc(6px + env(safe-area-inset-top, 0px));
+    padding-left: max(8px, env(safe-area-inset-left, 0px));
+    padding-right: max(8px, env(safe-area-inset-right, 0px));
+  }
   .topbar-project { display: none; }
-  #conn-text { max-width: 28vw; }
+  .icon-button { padding: 12px; } /* 20px icon + 24px padding = 44pt target */
+  .logout-button { border: none; padding: 12px; }
+  .logout-button .icon { width: 19px; height: 19px; }
+  .logout-label { display: none; }
+  /* The dot always shows state; prose appears only when something is wrong. */
+  #conn-text { display: none; max-width: 34vw; }
+  .top-status.alert #conn-text { display: block; }
+
+  /* --- drawer --- */
   .sidebar {
     position: fixed;
     top: 0; left: 0; bottom: 0;
     z-index: 20;
     transform: translateX(-100%);
     transition: transform var(--t-med) var(--ease);
-    width: min(300px, 85vw);
+    width: min(320px, 86vw);
     padding-top: calc(8px + env(safe-area-inset-top));
+    padding-left: env(safe-area-inset-left, 0px);
     margin-left: 0 !important;
     border-right: 1px solid var(--hairline);
   }
   .sidebar.open { transform: translateX(0); box-shadow: var(--shadow); }
-  .stream { padding: 18px 14px; }
+  .project-list button, .task-list button, .queue-list button { padding: 12px 10px; }
+
+  /* --- task header --- */
   .task-header { padding: 8px 14px; gap: 8px; }
   .tabs { order: 3; width: 100%; justify-content: stretch; }
-  .tab { flex: 1; text-align: center; }
+  .tab { flex: 1; text-align: center; padding: 9px 4px; }
+  .task-actions { margin-left: auto; overflow-x: auto; scrollbar-width: none; }
+  .task-actions::-webkit-scrollbar { display: none; }
+  .task-actions .ghost-button { padding: 8px 14px; }
+
+  /* --- content --- */
+  .stream {
+    padding: 16px 14px;
+    padding-left: max(14px, env(safe-area-inset-left, 0px));
+    padding-right: max(14px, env(safe-area-inset-right, 0px));
+  }
   #approval-area { padding: 0 14px; }
-  .composer-wrap { padding: 6px 10px calc(10px + env(safe-area-inset-bottom)); }
-  .composer { border-radius: var(--r-lg); }
-  .chip-select { max-width: 132px; flex-shrink: 1; min-width: 0; }
-  .segmented { order: 3; width: 100%; justify-content: stretch; }
-  .seg { flex: 1; text-align: center; padding: 6px 4px; }
-  .send-button { width: 42px; height: 42px; }
   .msg-user { max-width: 92% !important; }
+
+  /* --- composer: textarea, one scrollable strip, send --- */
+  .composer-wrap {
+    padding: 6px 10px calc(10px + env(safe-area-inset-bottom));
+    padding-left: max(10px, env(safe-area-inset-left, 0px));
+    padding-right: max(10px, env(safe-area-inset-right, 0px));
+  }
+  .composer { border-radius: var(--r-lg); }
+  /* Fade hints that the strip continues past the edge; the end padding lets
+     the last chip scroll clear of the fade. */
+  .composer-chips {
+    padding-right: 24px;
+    -webkit-mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 24px), transparent);
+    mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 24px), transparent);
+  }
+  /* 16px keeps iOS from zooming when a select opens its picker. */
+  .chip-select { font-size: 16px; padding: 7px 12px; max-width: 40vw; }
+  .seg { padding: 8px 13px; font-size: 13px; }
+  .send-button { width: 44px; height: 44px; align-self: flex-end; }
+  .send-button .icon { width: 20px; height: 20px; }
 }
+

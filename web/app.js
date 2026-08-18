@@ -352,6 +352,7 @@ async function refreshStatus() {
     const status = await api('/api/status');
     const busy = status.running.length > 0;
     $('conn-dot').className = status.agentReady ? (busy ? 'dot dot-busy pulse' : 'dot dot-ok') : 'dot dot-bad';
+    $('top-status').classList.toggle('alert', !status.agentReady);
     $('conn-text').textContent = busy
       ? `Working on #${status.running.join(', #')}`
       : status.agentReady ? 'Ready' : 'Agent not signed in';
@@ -880,6 +881,7 @@ function connectEvents() {
     // this device having no internet is a different state from the home PC
     // being unreachable.
     $('conn-dot').className = 'dot dot-bad';
+    $('top-status').classList.add('alert');
     $('conn-text').textContent = navigator.onLine ? 'Home PC unreachable — reconnecting…' : 'No internet connection';
   };
 }
@@ -1174,18 +1176,37 @@ if (!isStandalone() && /iphone|ipad|ipod/i.test(navigator.userAgent)) {
 window.addEventListener('online', () => { refreshStatus(); });
 window.addEventListener('offline', () => {
   $('conn-dot').className = 'dot dot-bad';
+  $('top-status').classList.add('alert');
   $('conn-text').textContent = 'No internet connection';
 });
 
-// Keep the composer visible above the mobile keyboard where the browser
-// resizes the visual viewport instead of the layout.
+// Pinned-shell keyboard handling: the page itself never scrolls (fixed body),
+// so the app must track the visual viewport. When the iOS keyboard or Safari's
+// bottom URL bar changes it, --vvh resizes the shell in place — the composer
+// rises with the keyboard instead of the whole page being shoved upwards.
 if (window.visualViewport) {
-  window.visualViewport.addEventListener('resize', () => {
+  const vv = window.visualViewport;
+  const syncViewport = () => {
+    document.documentElement.style.setProperty('--vvh', `${Math.round(vv.height)}px`);
+    // iOS still nudges the pinned shell when focusing an input; undo it.
+    if (window.scrollY !== 0 || window.scrollX !== 0) window.scrollTo(0, 0);
     if (document.activeElement === promptInput) {
-      promptInput.scrollIntoView({ block: 'end' });
+      const stream = $('stream');
+      stream.scrollTo({ top: stream.scrollHeight, behavior: 'instant' });
     }
-  });
+  };
+  vv.addEventListener('resize', syncViewport);
+  vv.addEventListener('scroll', syncViewport);
+  syncViewport();
 }
+
+// Keep the conversation's tail in view once the keyboard has settled.
+promptInput.addEventListener('focus', () => {
+  setTimeout(() => {
+    const stream = $('stream');
+    stream.scrollTo({ top: stream.scrollHeight, behavior: 'instant' });
+  }, 300);
+});
 
 // ------------------------------------------------------------------ boot
 
