@@ -423,7 +423,7 @@ The part before the `:` is the project id. With a single project registered you 
 ### Commands
 
 | Command                          | What it does                             |
-| -------------------------------- | ---------------------------------------- |
+| -------------------------------- | ---------------------------------------- | --- | --------------------- | --------------------------------------------------------- | --- | -------- | --------------- |
 | `/help`                          | Command list                             |
 | `/status`                        | Connection, model, queue, credits used   |
 | `/projects`                      | Registered projects                      |
@@ -431,7 +431,7 @@ The part before the `:` is the project id. With a single project registered you 
 | `/logs <id>`                     | Detailed log for one task                |
 | `/cancel <id>`                   | Stop a running task                      |
 | `/retry <id>`                    | Re-run a failed task                     |
-| `/followup <id> <…>`             | Continue a finished task's agent session || `/git [project] <op>`            | Git remote control: `status` `fetch` `pull` `push` `sync` || `/usage`                         | AI credits used                          |
+| `/followup <id> <…>`             | Continue a finished task's agent session |     | `/git [project] <op>` | Git remote control: `status` `fetch` `pull` `push` `sync` |     | `/usage` | AI credits used |
 | `/approve <id>` · `/reject <id>` | Answer an approval by text               |
 
 ### What a run looks like
