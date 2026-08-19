@@ -1,6 +1,6 @@
 {
   "name": "coderelay",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "Remote-control your own coding agents. Send a task from your phone; your home PC runs GitHub Copilot CLI or Claude Code against your local repo, runs your tests, and reports back. Telegram bot + installable web app, zero recurring cost.",
   "license": "MIT",

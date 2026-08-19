@@ -3,7 +3,7 @@
 All notable changes to CodeRelay. Format: [Keep a Changelog](https://keepachangelog.com),
 versioning: [SemVer](https://semver.org).
 
-## [Unreleased]
+## [1.1.0] — 2026-08-19
 
 ### Added
 - **Self-healing startup.** A 5-minute watchdog trigger revives the agent if it
