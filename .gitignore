@@ -17,6 +17,9 @@ Thumbs.db
 # Copilot session artifacts
 copilot-session-*.md
 
+# Personal launch/marketing notes — never ship with the repo
+social.md
+
 # Throwaway repos created by scripts/live-acceptance.mjs (spends real credits)
 .live-acceptance-*/
 # Scratch workspaces for manual web-UI testing
