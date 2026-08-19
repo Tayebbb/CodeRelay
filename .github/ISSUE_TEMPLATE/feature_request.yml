@@ -1,0 +1,29 @@
+name: Feature request
+description: Propose an improvement or new capability
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before writing: CodeRelay's ground rules are **zero recurring cost, no
+        new dependencies, never weaken the security model**. Proposals that fit
+        those constraints have a much easier path in.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What can't you do today, or what is more painful than it should be?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How should it work? Sketch the UX (Telegram command, web UI, config…).
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Including "why not just…" answers you already ruled out.

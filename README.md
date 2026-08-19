@@ -770,6 +770,6 @@ MIT — see [LICENSE](LICENSE).
 
 ## Contributing
 
-Issues and pull requests welcome — **[CONTRIBUTING.md](CONTRIBUTING.md)** has the ground rules. The short version: `npm test` must pass (it makes no AI calls), no new dependencies, and anything touching permissions, redaction, git safety, the state machine or the approval flow must come with a test.
+Issues and pull requests welcome — **[CONTRIBUTING.md](CONTRIBUTING.md)** has the ground rules and **[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)** the behavioral ones; changes land in **[CHANGELOG.md](CHANGELOG.md)**. The short version: `npm test` must pass (it makes no AI calls), no new dependencies, and anything touching permissions, redaction, git safety, the state machine or the approval flow must come with a test.
 
 Found a **security issue**? Please report it privately — see [SECURITY.md](SECURITY.md) — never in a public issue.

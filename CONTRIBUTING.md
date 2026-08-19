@@ -2,7 +2,9 @@
 
 Thanks for considering a contribution. CodeRelay is a small, security-focused,
 self-hosted tool — contributions are judged by that standard: correctness and
-safety first, features second, size last.
+safety first, features second, size last. Interactions are governed by the
+[Code of Conduct](CODE_OF_CONDUCT.md); user-visible changes are recorded in
+[CHANGELOG.md](CHANGELOG.md).
 
 ## Getting set up
 

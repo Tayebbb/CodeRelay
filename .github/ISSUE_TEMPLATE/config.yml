@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability (private)
+    url: https://github.com/Tayebbb/CodeRelay/security/advisories/new
+    about: Never report security problems in a public issue.
+  - name: Questions & ideas
+    url: https://github.com/Tayebbb/CodeRelay/discussions
+    about: Ask setup questions or float ideas before opening an issue.

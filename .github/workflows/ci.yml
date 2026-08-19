@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# A superseded push has nothing left to prove.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     # Windows only, deliberately: it is the platform every safety property has
@@ -19,6 +24,6 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      # lint (strict tsc) + build + 378 tests. Uses a mock agent CLI — no AI
-      # calls, no credits, no secrets required.
+      # lint (strict tsc) + build + the full test suite. Uses a mock agent CLI
+      # — no AI calls, no credits, no secrets required.
       - run: npm test
