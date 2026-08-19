@@ -51,6 +51,42 @@ describe('startup task name consistency', () => {
     assert.match(script, /param\(/);
     assert.match(script, /\$NodeExe/);
   });
+
+  // "PC on" usually means "resumed from sleep", which fires no logon event.
+  // Without the watchdog tick, an agent killed mid-session stayed dead for
+  // days until the next real sign-in (observed 2026-08-18 → 19).
+  test('install script registers both the logon trigger and the watchdog tick', () => {
+    const script = fs.readFileSync(installScriptPath(PROJECT_ROOT), 'utf8');
+    assert.match(script, /New-ScheduledTaskTrigger -AtLogOn/);
+    assert.match(script, /-RepetitionInterval/);
+    // Indefinite repetition: [TimeSpan]::MaxValue is rejected by
+    // Register-ScheduledTask, so the duration must be cleared instead.
+    assert.match(script, /Repetition\.Duration = \$null/);
+    assert.doesNotMatch(script, /\[TimeSpan\]::MaxValue.*RepetitionDuration|RepetitionDuration.*\[TimeSpan\]::MaxValue/);
+    // Both triggers must actually be registered.
+    assert.match(script, /-Trigger\s+@\(\$logonTrigger, \$tickTrigger\)/);
+    // The tick is only safe alongside IgnoreNew (no duplicate instances) and
+    // StartWhenAvailable (a tick missed during sleep runs on wake).
+    assert.match(script, /-MultipleInstances IgnoreNew/);
+    assert.match(script, /-StartWhenAvailable/);
+  });
+
+  // A visible console window is load-bearing by accident: closing it sends
+  // CTRL_CLOSE to the whole console and kills supervisor + agent in one click
+  // (observed 2026-08-18). The action must stay behind the hidden launcher.
+  test('install script launches the agent with no visible console window', () => {
+    const script = fs.readFileSync(installScriptPath(PROJECT_ROOT), 'utf8');
+    assert.match(script, /start-agent-hidden\.ps1/);
+    assert.match(script, /-WindowStyle Hidden/);
+    const hidden = fs.readFileSync(
+      path.join(PROJECT_ROOT, 'scripts', 'start-agent-hidden.ps1'),
+      'utf8',
+    );
+    assert.match(hidden, /start-agent\.cmd/);
+    assert.match(hidden, /-WindowStyle Hidden/);
+    // The supervisor's exit code must survive the extra layer.
+    assert.match(hidden, /exit \$proc\.ExitCode/);
+  });
 });
 
 describe('startup command construction', () => {

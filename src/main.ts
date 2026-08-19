@@ -321,6 +321,11 @@ export async function main(): Promise<number> {
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
   process.on('SIGBREAK', () => void shutdown('SIGBREAK'));
+  // CTRL_CLOSE (console window closed) arrives as SIGHUP with a ~5s budget
+  // before Windows force-kills. Without a handler node dies instantly and
+  // silently — a whole night of "who killed the agent?" forensics hinged on
+  // this line existing. Best-effort cleanup; the first log write is sync.
+  process.on('SIGHUP', () => void shutdown('SIGHUP'));
   process.on('unhandledRejection', (reason) => log.error('Unhandled rejection', { error: errorMessage(reason) }));
   process.on('uncaughtException', (err) => {
     // Staying alive after a fatal error produces a wedged agent that looks idle

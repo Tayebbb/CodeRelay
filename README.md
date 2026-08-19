@@ -18,7 +18,7 @@
 - **Free to run.** Uses the AI subscription you already have — GitHub Copilot by default, Claude Code as an alternative. Pick the agent CLI **and** model per task from the web app. No server, no hosting, no extra monthly bill.
 - **Two ways in.** Telegram bot, an installable web app, or both — same tasks, same history, either one is optional.
 - **No surprise AI spend.** CodeRelay does not automatically perform additional AI actions beyond your request — no task, no AI call. Reboots, restarts and idle time cost zero credits, and every task runs under hard daily and per-task budgets.
-- **Survives reboots.** `npm run agent -- startup install` once, and Windows starts it at logon and restarts it after a crash — no terminal, no VS Code window, no admin rights.
+- **Survives reboots.** `npm run agent -- startup install` once, and Windows starts it at logon, restarts it after a crash, and a watchdog re-launches it within 5 minutes if it is ever found dead (waking from sleep included) — no terminal, no VS Code window, no admin rights.
 - **Built paranoid.** Your uncommitted work is snapshotted before every task, nothing is pushed without your approval, and secrets never leave the machine.
 
 <p align="center">
@@ -325,7 +325,7 @@ npm run agent -- startup status
 npm run agent -- startup remove     # keeps all data, projects and history
 ```
 
-`install` registers a per-user Windows Scheduled Task — no admin rights, no Windows service, and installing twice replaces rather than duplicates. It starts at logon, restarts within a minute if it crashes (bounded, not forever), and keeps running after you close your terminal. `remove` only removes the auto-start: CodeRelay, your projects, task history and configuration stay untouched.
+`install` registers a per-user Windows Scheduled Task — no admin rights, no Windows service, and installing twice replaces rather than duplicates. It starts at logon, restarts within a minute if it crashes (bounded, not forever), keeps running after you close your terminal, and a watchdog trigger re-launches it within 5 minutes if the whole process is ever killed — including when the PC wakes from sleep with the agent dead, which fires no logon event. It runs with **no visible window**, so there is no stray console to close by accident. `remove` only removes the auto-start: CodeRelay, your projects, task history and configuration stay untouched.
 
 **Starting is free.** Booting the agent never starts an AI task and consumes zero AI credits — it restores its queue from disk and waits for you. Your subscription is only used when the existing task flow runs work you submitted, under all the usual budgets and approval gates.
 
@@ -345,7 +345,7 @@ Stop the machine sleeping:
 powercfg /change standby-timeout-ac 0
 ```
 
-The task triggers **at logon**. If Windows reboots while you are away and stops at the lock screen, nothing runs until someone signs in. For long absences, enable Windows automatic sign-in.
+The task runs **in your session**. If Windows reboots while you are away and stops at the lock screen, nothing runs until someone signs in. For long absences, enable Windows automatic sign-in. While you stay signed in — including across sleep and wake — the watchdog keeps the agent alive without any action from you.
 
 ---
 
