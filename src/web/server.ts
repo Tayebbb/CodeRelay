@@ -169,18 +169,6 @@ export class WebServer {
     }
 
     this.unsubscribe = this.deps.bus.subscribe((event) => this.broadcast(event));
-    this.heartbeat = setInterval(() => {
-      for (const client of this.sseClients) {
-        // A socket can die between its last write and its 'close' event; a
-        // throw here would take down the whole process via uncaughtException.
-        try {
-          client.write(': keepalive\n\n');
-        } catch {
-          this.sseClients.delete(client);
-        }
-      }
-    }, SSE_HEARTBEAT_MS);
-    this.heartbeat.unref?.();
 
     const delays = this.deps.bindRetryDelaysMs ?? BIND_RETRY_DELAYS_MS;
     for (let attempt = 0; ; attempt++) {
@@ -690,9 +678,33 @@ export class WebServer {
     }
 
     this.sseClients.add(res);
+    this.ensureHeartbeat();
     req.on('close', () => {
       this.sseClients.delete(res);
     });
+  }
+
+  /** Keepalive timer exists only while clients are connected — an idle agent
+   * with no open pages schedules no wakeups. Self-stops when the set empties. */
+  private ensureHeartbeat(): void {
+    if (this.heartbeat) return;
+    this.heartbeat = setInterval(() => {
+      if (this.sseClients.size === 0) {
+        if (this.heartbeat) clearInterval(this.heartbeat);
+        this.heartbeat = null;
+        return;
+      }
+      for (const client of this.sseClients) {
+        // A socket can die between its last write and its 'close' event; a
+        // throw here would take down the whole process via uncaughtException.
+        try {
+          client.write(': keepalive\n\n');
+        } catch {
+          this.sseClients.delete(client);
+        }
+      }
+    }, SSE_HEARTBEAT_MS);
+    this.heartbeat.unref?.();
   }
 
   private broadcast(event: BusEvent): void {

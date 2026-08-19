@@ -5,8 +5,9 @@ import { createLogger } from '../core/logger.js';
 
 const log = createLogger('lock');
 
-/** How often a live owner touches the lock file. */
-const HEARTBEAT_MS = 30_000;
+/** How often a live owner touches the lock file. Generous relative to
+ * STALE_AFTER_MS (5× margin) to keep idle disk writes rare. */
+const HEARTBEAT_MS = 120_000;
 /** A lock this quiet within one boot has no live owner behind it. */
 const STALE_AFTER_MS = 10 * 60_000;
 /** Guards the boot-time comparison against wall-clock adjustments. */
@@ -78,7 +79,7 @@ export function isProcessAlive(pid: number): boolean {
  *   2. lock last touched before the current OS boot — no process survived
  *      the reboot, so it cannot have a live owner;
  *   3. lock silent for far longer than the heartbeat interval — a live owner
- *      touches the file every 30 seconds; a recycled pid does not.
+ *      touches the file every two minutes; a recycled pid does not.
  */
 export function acquireLock(file: string, options: LockOptions = {}): LockResult {
   const now = options.nowMs ?? Date.now;

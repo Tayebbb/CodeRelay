@@ -46,7 +46,11 @@ export class TaskQueue {
     }
     this.lastRecovery = recovered;
 
-    const interval = this.options.pollIntervalMs ?? 1_500;
+    // The poll is only a safety net: every enqueue/cancel/retry path calls
+    // kick(), and a finishing task re-drains. 15s keeps the idle loop quiet
+    // (~5,700 queries/day instead of ~57,000) with no pickup latency for
+    // user-driven work.
+    const interval = this.options.pollIntervalMs ?? 15_000;
     this.timer = setInterval(() => void this.drain(), interval);
     this.timer.unref?.();
     void this.drain();

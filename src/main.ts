@@ -87,6 +87,21 @@ export async function main(): Promise<number> {
     return 2;
   }
 
+  // The lock comes BEFORE provider detection: a losing instance (watchdog
+  // probe, standby retry, manual double-start) must cost milliseconds, not
+  // seconds of CLI child processes probing every provider just to exit 5.
+  const pidFile = path.join(config.storage.workspace, 'agent.pid');
+  const lock = acquireLock(pidFile);
+  if (!lock.acquired) {
+    // Deliberately NOT reported to Telegram: the instance already running is
+    // the one that will answer, and a message per restart attempt is noise.
+    // It must reach the log file though — under the scheduled task there is
+    // no console for anyone to read.
+    console.error(`\nAnother agent instance is already running (pid ${lock.heldBy?.pid}).\n`);
+    log.error('Refusing to start: another instance holds the lock', { pid: lock.heldBy?.pid ?? null });
+    return 5;
+  }
+
   /**
    * Tell the operator why we are refusing to start, THEN exit.
    *
@@ -99,6 +114,7 @@ export async function main(): Promise<number> {
     console.error(`\n${message}\n`);
     log.error('Refusing to start', { code, message });
     await notifyOperatorsDirect(config, `🚫 The coding agent could not start.\n\n${message}`);
+    lock.release();
     return code;
   };
 
@@ -163,18 +179,6 @@ export async function main(): Promise<number> {
     }
   }
 
-  const pidFile = path.join(config.storage.workspace, 'agent.pid');
-  const lock = acquireLock(pidFile);
-  if (!lock.acquired) {
-    // Deliberately NOT reported to Telegram: the instance already running is
-    // the one that will answer, and a message per restart attempt is noise.
-    // It must reach the log file though — under the scheduled task there is
-    // no console for anyone to read.
-    console.error(`\nAnother agent instance is already running (pid ${lock.heldBy?.pid}).\n`);
-    log.error('Refusing to start: another instance holds the lock', { pid: lock.heldBy?.pid ?? null });
-    return 5;
-  }
-
   let db;
   let quarantined: string | null = null;
   try {
@@ -185,7 +189,7 @@ export async function main(): Promise<number> {
       log.error('Task database was corrupt and has been moved aside; starting with a fresh one', { quarantined });
     }
   } catch (err) {
-    lock.release();
+    // abort() releases the lock.
     return await abort(
       6,
       `Could not open the task database (${config.storage.databaseFile}): ${errorMessage(err)}`,

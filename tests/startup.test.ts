@@ -87,6 +87,16 @@ describe('startup task name consistency', () => {
     // The supervisor's exit code must survive the extra layer.
     assert.match(hidden, /exit \$proc\.ExitCode/);
   });
+
+  // Exit 5 (lock held) must STAND BY, not exit: an exiting instance ends the
+  // scheduled task, and with an orphaned agent still holding the lock every
+  // watchdog tick then spawned a full probe stack forever (observed 2026-08-19).
+  test('supervisor loop adopts instead of exiting when the lock is held', () => {
+    const script = fs.readFileSync(path.join(PROJECT_ROOT, 'scripts', 'start-agent.cmd'), 'utf8');
+    assert.match(script, /if "%EXIT_CODE%"=="5" \(/);
+    assert.doesNotMatch(script, /if "%EXIT_CODE%"=="5" exit/);
+    assert.match(script, /if "%EXIT_CODE%"=="0" exit \/b 0/);
+  });
 });
 
 describe('startup command construction', () => {
