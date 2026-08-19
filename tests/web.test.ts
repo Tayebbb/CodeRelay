@@ -84,6 +84,7 @@ function testConfig(workspace: string): AppConfig {
       sessionTtlMs: 60 * 60 * 1000,
       authFile: path.join(workspace, 'web-auth.json'),
     },
+    heartbeat: { enabled: false, hour: 9 },
     logLevel: 'error',
   };
 }

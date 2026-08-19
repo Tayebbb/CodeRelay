@@ -92,6 +92,11 @@ export interface AppConfig {
     /** Password hash file; created by `remote-agent web setup`. */
     authFile: string;
   };
+  /** Daily "still alive" Telegram ping; its absence is the operator's alarm. */
+  heartbeat: {
+    enabled: boolean;
+    hour: number;
+  };
   logLevel: LogLevel;
 }
 
@@ -294,6 +299,10 @@ export function loadConfig(options: LoadOptions = {}): AppConfig {
       port: int('WEB_PORT', 8787, { min: 1, max: 65535 }),
       sessionTtlMs: int('WEB_SESSION_TTL_HOURS', 24 * 7, { min: 1 }) * 60 * 60 * 1000,
       authFile: path.join(workspace, 'web-auth.json'),
+    },
+    heartbeat: {
+      enabled: bool('DAILY_HEARTBEAT', true),
+      hour: int('DAILY_HEARTBEAT_HOUR', 9, { min: 0, max: 23 }),
     },
     logLevel,
   };

@@ -451,6 +451,18 @@ export class TaskRepository {
     this.db.prepare('DELETE FROM outbox WHERE id = ? AND attempts >= ?').run(id, maxAttempts);
   }
 
+  /** Terminal-task counts since a timestamp, for the daily heartbeat. */
+  completedCountsSince(sinceMs: number): { completed: number; failed: number } {
+    const row = this.db
+      .prepare(
+        "SELECT SUM(CASE WHEN status = 'COMPLETED' THEN 1 ELSE 0 END) AS ok, " +
+          "SUM(CASE WHEN status IN ('FAILED','TIMED_OUT','CANCELLED') THEN 1 ELSE 0 END) AS bad " +
+          'FROM tasks WHERE completed_at IS NOT NULL AND completed_at >= ?',
+      )
+      .get(sinceMs) as { ok: number | null; bad: number | null };
+    return { completed: row.ok ?? 0, failed: row.bad ?? 0 };
+  }
+
   /** Retention sweep so the database stays small over months of operation. */
   pruneHistory(options: { eventMaxAgeMs?: number; usageMaxAgeMs?: number; taskMaxAgeMs?: number } = {}): void {
     const now = Date.now();

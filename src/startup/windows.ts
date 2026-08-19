@@ -56,9 +56,13 @@ export function uninstallArgv(root: string = PROJECT_ROOT): string[] {
 /** Constant query — the task name is a compile-time constant, never user input. */
 const QUERY_COMMAND =
   `$t = Get-ScheduledTask -TaskName '${STARTUP_TASK_NAME}' -ErrorAction Stop; ` +
+  `$i = $t | Get-ScheduledTaskInfo; ` +
   `[pscustomobject]@{ state = [string]$t.State; restartCount = $t.Settings.RestartCount; ` +
   `restartInterval = [string]$t.Settings.RestartInterval; execute = $t.Actions[0].Execute; ` +
-  `arguments = $t.Actions[0].Arguments; workingDirectory = $t.Actions[0].WorkingDirectory } | ConvertTo-Json`;
+  `arguments = $t.Actions[0].Arguments; workingDirectory = $t.Actions[0].WorkingDirectory; ` +
+  `triggerCount = @($t.Triggers).Count; ` +
+  `triggerTypes = (@($t.Triggers) | ForEach-Object { $_.CimClass.CimClassName }) -join ','; ` +
+  `lastTaskResult = $i.LastTaskResult; lastRunTime = [string]$i.LastRunTime } | ConvertTo-Json`;
 
 export function queryArgv(): string[] {
   return ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', QUERY_COMMAND];
@@ -71,6 +75,11 @@ export interface ScheduledTaskFacts {
   execute: string;
   arguments: string;
   workingDirectory: string;
+  /** Null when queried from a build that predates the watchdog trigger. */
+  triggerCount: number | null;
+  triggerTypes: string;
+  lastTaskResult: number | null;
+  lastRunTime: string;
 }
 
 export function parseTaskFacts(stdout: string): ScheduledTaskFacts | null {
@@ -84,6 +93,10 @@ export function parseTaskFacts(stdout: string): ScheduledTaskFacts | null {
       execute: typeof parsed.execute === 'string' ? parsed.execute : '',
       arguments: typeof parsed.arguments === 'string' ? parsed.arguments : '',
       workingDirectory: typeof parsed.workingDirectory === 'string' ? parsed.workingDirectory : '',
+      triggerCount: typeof parsed.triggerCount === 'number' ? parsed.triggerCount : null,
+      triggerTypes: typeof parsed.triggerTypes === 'string' ? parsed.triggerTypes : '',
+      lastTaskResult: typeof parsed.lastTaskResult === 'number' ? parsed.lastTaskResult : null,
+      lastRunTime: typeof parsed.lastRunTime === 'string' ? parsed.lastRunTime : '',
     };
   } catch {
     return null;

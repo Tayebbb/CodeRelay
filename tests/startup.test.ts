@@ -23,6 +23,7 @@ import {
   uninstallScriptPath,
   validateBuilt,
 } from '../src/startup/windows.js';
+import { formatHeartbeat, msUntilNextLocalHour } from '../src/notify/heartbeat.js';
 import { PROJECT_ROOT } from '../src/core/config.js';
 
 describe('startup platform guard', () => {
@@ -158,6 +159,10 @@ describe('scheduled task query parsing', () => {
         execute: 'C:\\nodejs\\node.exe',
         arguments: '--no-warnings=ExperimentalWarning "E:\\repo\\dist\\src\\main.js"',
         workingDirectory: 'E:\\repo',
+        triggerCount: 2,
+        triggerTypes: 'MSFT_TaskLogonTrigger,MSFT_TaskTimeTrigger',
+        lastTaskResult: 0,
+        lastRunTime: '08/19/2026 17:10:01',
       }),
     );
     assert.ok(facts);
@@ -165,11 +170,59 @@ describe('scheduled task query parsing', () => {
     assert.equal(facts!.restartCount, 999);
     assert.equal(facts!.restartInterval, 'PT1M');
     assert.equal(facts!.workingDirectory, 'E:\\repo');
+    assert.equal(facts!.triggerCount, 2);
+    assert.match(facts!.triggerTypes, /TimeTrigger/);
+    assert.equal(facts!.lastTaskResult, 0);
+  });
+
+  // Doctor diagnoses a missing watchdog from these fields; the query must
+  // keep producing them.
+  test('query command fetches trigger and last-result facts', () => {
+    const command = queryArgv()[queryArgv().length - 1]!;
+    assert.match(command, /Get-ScheduledTaskInfo/);
+    assert.match(command, /triggerCount/);
+    assert.match(command, /lastTaskResult/);
+  });
+
+  test('tolerates facts JSON from an older build without trigger fields', () => {
+    const facts = parseTaskFacts(JSON.stringify({ state: 'Ready' }));
+    assert.ok(facts);
+    assert.equal(facts!.triggerCount, null);
+    assert.equal(facts!.lastTaskResult, null);
   });
 
   test('returns null on garbage rather than throwing', () => {
     assert.equal(parseTaskFacts('ERROR: something in Norwegian'), null);
     assert.equal(parseTaskFacts(''), null);
+  });
+});
+
+describe('console-close survivability', () => {
+  // CTRL_CLOSE arrives as SIGHUP with a ~5s budget; without this handler the
+  // agent dies silently and the log never says why (cost a night of forensics).
+  test('main.ts registers a SIGHUP handler', () => {
+    const source = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'main.ts'), 'utf8');
+    assert.match(source, /process\.on\('SIGHUP'/);
+  });
+});
+
+describe('daily heartbeat scheduling', () => {
+  test('targets the next occurrence of the configured hour', () => {
+    const now = new Date(2026, 7, 19, 10, 30, 0);
+    // 9:00 already passed today → tomorrow 9:00.
+    assert.equal(msUntilNextLocalHour(9, now), 22.5 * 60 * 60 * 1000);
+    // 11:00 is still ahead today.
+    assert.equal(msUntilNextLocalHour(11, now), 30 * 60 * 1000);
+  });
+
+  test('exactly at the hour schedules the NEXT day, never a double-send', () => {
+    const now = new Date(2026, 7, 19, 9, 0, 0, 0);
+    assert.equal(msUntilNextLocalHour(9, now), 24 * 60 * 60 * 1000);
+  });
+
+  test('message shape covers idle and busy days', () => {
+    assert.match(formatHeartbeat(26 * 60 * 60 * 1000, { completed: 0, failed: 0 }), /online, uptime 26h, no tasks/);
+    assert.match(formatHeartbeat(60 * 60 * 1000, { completed: 3, failed: 1 }), /3 completed, 1 failed/);
   });
 });
 

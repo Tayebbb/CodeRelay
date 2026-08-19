@@ -11,6 +11,8 @@ import { detectCommands } from '../verify/detector.js';
 import { bootstrapConfig, ConfigError, PROJECT_ROOT, type AppConfig } from '../core/config.js';
 import { openDatabase } from '../db/database.js';
 import { errorMessage } from '../core/logger.js';
+import { queryTask, startupSupported, STARTUP_TASK_NAME } from '../startup/windows.js';
+import { isProcessAlive } from '../core/lock.js';
 
 export type CheckStatus = 'pass' | 'warn' | 'fail' | 'skip';
 
@@ -125,6 +127,98 @@ function checkModel(config: AppConfig, info: CopilotInfo): CheckResult {
     status: selection.fellBack ? 'warn' : 'fail',
     detail: selection.note ?? 'model unavailable',
     hint: `Supported by this CLI build: ${info.models.join(', ')}`,
+  };
+}
+
+/** Bare-pid or JSON lock file written by acquireLock. */
+function lockFilePid(file: string): number | null {
+  try {
+    const raw = fs.readFileSync(file, 'utf8').trim();
+    if (/^\d+$/.test(raw)) return Number.parseInt(raw, 10);
+    const parsed = JSON.parse(raw) as { pid?: number };
+    return typeof parsed.pid === 'number' ? parsed.pid : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Cross-checks the scheduled task against the live agent. Every silent failure
+ * mode observed in production — task missing, watchdog trigger missing, agent
+ * orphaned from its task instance, agent dead — surfaces here as one line.
+ */
+async function checkStartupChain(config: AppConfig): Promise<CheckResult> {
+  const name = 'Auto-start task';
+  if (!startupSupported()) return { name, status: 'skip', detail: 'only supported on Windows' };
+
+  const pid = lockFilePid(path.join(config.storage.workspace, 'agent.pid'));
+  const agentAlive = pid !== null && isProcessAlive(pid);
+  let facts;
+  try {
+    facts = await queryTask();
+  } catch (err) {
+    return { name, status: 'warn', detail: errorMessage(err) };
+  }
+  if (!facts) {
+    return {
+      name,
+      status: 'warn',
+      detail: agentAlive ? `agent running (pid ${pid}) but no auto-start is installed` : 'not installed — the agent will not survive a reboot',
+      hint: 'Run: npm run agent -- startup install',
+    };
+  }
+  if ((facts.triggerCount ?? 0) < 2) {
+    return {
+      name,
+      status: 'warn',
+      detail: `task "${STARTUP_TASK_NAME}" has ${facts.triggerCount ?? '?'} trigger(s) — the 5-minute watchdog is missing`,
+      hint: 'Re-run: npm run agent -- startup install',
+    };
+  }
+  if (agentAlive && facts.state !== 'Running') {
+    return {
+      name,
+      status: 'warn',
+      detail: `agent runs (pid ${pid}) but unsupervised — task state is ${facts.state}`,
+      hint: 'Self-corrects: the next watchdog tick (≤5 min) starts a standby that adopts it.',
+    };
+  }
+  if (!agentAlive && facts.state !== 'Running') {
+    const lastResult = facts.lastTaskResult === null ? '' : `, last result 0x${facts.lastTaskResult.toString(16).toUpperCase()}`;
+    return {
+      name,
+      status: 'warn',
+      detail: `agent is not running (task state ${facts.state}${lastResult})`,
+      hint: 'The watchdog starts it within 5 minutes; or: Start-ScheduledTask -TaskName ' + STARTUP_TASK_NAME,
+    };
+  }
+  return {
+    name,
+    status: 'pass',
+    detail: `state ${facts.state}, logon + watchdog triggers${agentAlive ? `, agent pid ${pid}` : ' (instance starting or standby)'}`,
+  };
+}
+
+/** Remote tasks stall while the PC sleeps; make that a choice, not a surprise. */
+async function checkSleepSettings(): Promise<CheckResult> {
+  const name = 'Sleep settings';
+  if (process.platform !== 'win32') return { name, status: 'skip', detail: 'only checked on Windows' };
+  const exe = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'powercfg.exe');
+  const result = await execCommand(exe, ['/q', 'SCHEME_CURRENT', 'SUB_SLEEP', 'STANDBYIDLE'], {
+    cwd: process.cwd(),
+    timeoutMs: 15_000,
+    shell: false,
+  });
+  // Localised Windows builds label the line differently; skip rather than guess.
+  const match = result.stdout.match(/AC Power Setting Index:\s*0x([0-9a-f]+)/i);
+  if (result.code !== 0 || !match) return { name, status: 'skip', detail: 'could not read power settings' };
+  const seconds = Number.parseInt(match[1]!, 16);
+  if (seconds === 0) return { name, status: 'pass', detail: 'PC does not sleep on AC power' };
+  return {
+    name,
+    status: 'warn',
+    detail: `PC sleeps after ${Math.round(seconds / 60)} min on AC — tasks sent from your phone stall until it wakes`,
+    hint: 'powercfg /change standby-timeout-ac 0',
   };
 }
 
@@ -367,9 +461,11 @@ export async function runDoctor(): Promise<DoctorReport> {
     results.push(checkFilesystem(config));
     results.push(checkDatabase(config));
     results.push(checkWebHost(config));
+    results.push(await checkStartupChain(config));
     results.push(...(await checkProjects(config)));
   }
 
+  results.push(await checkSleepSettings());
   results.push(await checkInternet());
 
   return { results, copilot, ok: results.every((r) => r.status !== 'fail') };

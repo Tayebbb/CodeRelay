@@ -14,6 +14,7 @@ import { TaskRunner } from './runner/taskRunner.js';
 import { TaskQueue } from './runner/queue.js';
 import { TelegramBot } from './telegram/bot.js';
 import { fanOutNotifier, nullNotifier, type Notifier } from './notify/notifier.js';
+import { formatHeartbeat, msUntilNextLocalHour } from './notify/heartbeat.js';
 import { EventBus } from './core/events.js';
 import { TaskService } from './core/taskService.js';
 import { GitControlService } from './core/gitControl.js';
@@ -264,6 +265,21 @@ export async function main(): Promise<number> {
 
   queue.start();
 
+  // Daily dead-man's switch: if the morning ping does not arrive, the agent
+  // (or the PC) is down. Telegram only — the web has no push channel.
+  let heartbeatTimer: NodeJS.Timeout | null = null;
+  if (bot && config.heartbeat.enabled) {
+    const scheduleHeartbeat = () => {
+      heartbeatTimer = setTimeout(() => {
+        const stats = tasks.completedCountsSince(Date.now() - 24 * 60 * 60 * 1000);
+        void bot.notifyOperators(formatHeartbeat(process.uptime() * 1000, stats)).catch(() => {});
+        scheduleHeartbeat();
+      }, msUntilNextLocalHour(config.heartbeat.hour));
+      heartbeatTimer.unref?.();
+    };
+    scheduleHeartbeat();
+  }
+
   // Approval waiters live only in memory. A task left in WAITING_APPROVAL by a
   // restart would otherwise never reach a terminal state.
   const stranded = tasks.pendingApprovals();
@@ -286,6 +302,7 @@ export async function main(): Promise<number> {
     if (exitCode !== 0) process.exitCode = exitCode;
     log.info('Shutting down', { signal });
     clearInterval(retentionTimer);
+    if (heartbeatTimer) clearTimeout(heartbeatTimer);
 
     // Stop polling FIRST: otherwise a task or approval created during the drain
     // below would be missed by cancelAll() and could block shutdown for minutes.
