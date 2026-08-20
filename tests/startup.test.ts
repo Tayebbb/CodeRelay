@@ -75,10 +75,17 @@ describe('startup task name consistency', () => {
   // A visible console window is load-bearing by accident: closing it sends
   // CTRL_CLOSE to the whole console and kills supervisor + agent in one click
   // (observed 2026-08-18). The action must stay behind the hidden launcher.
+  // And -WindowStyle Hidden alone is NOT enough: Windows Terminal as default
+  // terminal ignores it, making the wrapper a visible window that the watchdog
+  // respawned every 5 minutes after each close (observed 2026-08-20). The
+  // action must go through conhost --headless to bypass terminal delegation.
   test('install script launches the agent with no visible console window', () => {
     const script = fs.readFileSync(installScriptPath(PROJECT_ROOT), 'utf8');
     assert.match(script, /start-agent-hidden\.ps1/);
     assert.match(script, /-WindowStyle Hidden/);
+    assert.match(script, /conhost\.exe/);
+    assert.match(script, /-Execute \$conhost/);
+    assert.match(script, /--headless/);
     const hidden = fs.readFileSync(
       path.join(PROJECT_ROOT, 'scripts', 'start-agent-hidden.ps1'),
       'utf8',

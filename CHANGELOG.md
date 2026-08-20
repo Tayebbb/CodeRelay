@@ -3,6 +3,16 @@
 All notable changes to CodeRelay. Format: [Keep a Changelog](https://keepachangelog.com),
 versioning: [SemVer](https://semver.org).
 
+## [Unreleased]
+
+### Fixed
+- **Recurring popup window.** When Windows Terminal is the default terminal it
+  ignores `-WindowStyle Hidden`, so the startup task's "hidden" wrapper was a
+  visible window — and closing it made the 5-minute watchdog respawn it, over
+  and over. The task action now launches through `conhost.exe --headless`,
+  which bypasses terminal delegation: no window at logon, on watchdog ticks,
+  or in standby. Re-run `npm run agent -- startup install` to apply.
+
 ## [1.1.0] — 2026-08-19
 
 ### Added

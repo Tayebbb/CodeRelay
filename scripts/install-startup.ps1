@@ -38,11 +38,21 @@ if (-not (Test-Path (Join-Path $root '.env'))) {
 # an interactive-token task otherwise pops one, and closing that window sends
 # CTRL_CLOSE to the whole console — killing supervisor and agent in one click
 # with nothing in the log (observed 2026-08-18).
+#
+# conhost --headless is load-bearing: when Windows Terminal is the default
+# terminal, it hosts the task's console and IGNORES -WindowStyle Hidden, so
+# the "hidden" wrapper was a visible WT window. Closing it killed the task
+# instance, and the next watchdog tick respawned it — a window popping up
+# every 5 minutes forever (observed 2026-08-20). --headless allocates a
+# windowless classic console and bypasses terminal delegation entirely.
+# Trade-off: conhost does not propagate the child's exit code (LastTaskResult
+# reads 0) — acceptable because Task Scheduler ignores exit codes anyway.
 $hiddenLauncher = Join-Path $root 'scripts\start-agent-hidden.ps1'
 $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$conhost = Join-Path $env:SystemRoot 'System32\conhost.exe'
 $action = New-ScheduledTaskAction `
-    -Execute $powershell `
-    -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""$hiddenLauncher"" -NodeExe ""$nodeExe""" `
+    -Execute $conhost `
+    -Argument "--headless ""$powershell"" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""$hiddenLauncher"" -NodeExe ""$nodeExe""" `
     -WorkingDirectory $root
 
 $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
